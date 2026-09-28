@@ -1,16 +1,22 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
-use git2::{Commit, Repository};
-use std::collections::HashSet;
+use git2::{ErrorCode, ObjectType, Oid, Repository, Sort, Tree};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use crate::domain::{TaskId, TaskType};
-use crate::parser;
+use crate::domain::{Task, TaskId};
+use crate::{parser, storage};
 
-/// Git repository wrapper for Frump operations
-pub struct FrumpRepo {
-    repo: Repository,
-    frump_file: PathBuf,
+/// The task history of one board: every snapshot of that board in the ancestry of HEAD.
+///
+/// The repository is the one that contains the board, whatever the current directory is. A
+/// single-file board is read at its own path. A directory board is read from `<dir>/tasks/*.md`;
+/// in commits where `<dir>/general.md` does not exist yet, the sibling `<dir>.md` is read
+/// instead, because `migrate` and `commit` treat it as the same board.
+pub struct BoardHistory {
+    in_git: bool,
+    commits: Vec<CommitSnapshot>,
 }
 
 /// A historical snapshot of a task from git history
@@ -37,196 +43,327 @@ pub enum ChangeType {
     Deleted,
 }
 
-impl FrumpRepo {
-    /// Open a frump repository at the given path
-    pub fn open<P: AsRef<Path>>(repo_path: P) -> Result<Self> {
-        let repo = Repository::discover(repo_path.as_ref())
-            .context("Not a git repository or no git repository found")?;
+type Snapshot = BTreeMap<TaskId, Task>;
 
-        let frump_file = PathBuf::from("frump.md");
+struct CommitSnapshot {
+    oid: Oid,
+    parents: Vec<Oid>,
+    author: String,
+    date: DateTime<Utc>,
+    message: String,
+    tasks: Arc<Snapshot>,
+}
 
-        Ok(FrumpRepo { repo, frump_file })
-    }
+enum Layout {
+    File(PathBuf),
+    Directory {
+        dir: PathBuf,
+        legacy: Option<PathBuf>,
+    },
+}
 
-    /// Find the maximum task ID ever used in git history
-    pub fn max_historical_id(&self) -> Result<Option<TaskId>> {
-        let mut max_id: Option<TaskId> = None;
-
-        // Get all commits that touched frump.md
-        let mut revwalk = self.repo.revwalk()?;
-        revwalk.push_head()?;
-        revwalk.set_sorting(git2::Sort::TIME)?;
-
-        for oid in revwalk {
-            let oid = oid?;
-            let commit = self.repo.find_commit(oid)?;
-
-            // Try to read frump.md from this commit
-            if let Ok(content) = self.read_file_at_commit(&commit, &self.frump_file) {
-                // Parse and extract all task IDs
-                if let Ok(doc) = parser::parse(&content) {
-                    for task in doc.tasks.tasks() {
-                        if max_id.is_none() || task.id > max_id.unwrap() {
-                            max_id = Some(task.id);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(max_id)
-    }
-
-    /// Get the history of a specific task
-    pub fn task_history(&self, task_id: TaskId) -> Result<TaskHistory> {
-        let mut commits = Vec::new();
-        let mut task_exists_in_previous = false;
-
-        // Walk through commits
-        let mut revwalk = self.repo.revwalk()?;
-        revwalk.push_head()?;
-        revwalk.set_sorting(git2::Sort::TIME | git2::Sort::REVERSE)?;
-
-        for oid in revwalk {
-            let oid = oid?;
-            let commit = self.repo.find_commit(oid)?;
-
-            // Check if task exists in this commit
-            let task_exists =
-                if let Ok(content) = self.read_file_at_commit(&commit, &self.frump_file) {
-                    if let Ok(doc) = parser::parse(&content) {
-                        doc.tasks.find_by_id(task_id).is_some()
-                    } else {
-                        false
-                    }
-                } else {
-                    false
+impl BoardHistory {
+    /// Read the history of the board at `board`, a single file or a board directory.
+    ///
+    /// History holds task content only: task files, or the Tasks section of a single file. The
+    /// header, Team and Next sections are not read, so a committed typo there cannot make the
+    /// task numbers of that commit unreadable. A board outside git, or in a repository without
+    /// commits, has an empty history. A failed object read, a board path of the wrong kind, or
+    /// a task that does not parse is an error: an unreadable history must never pass for an
+    /// empty one.
+    pub fn load(board: &Path) -> Result<Self> {
+        let board = crate::board::resolve_board(board)?;
+        let board = board.as_path();
+        let empty = |in_git| BoardHistory {
+            in_git,
+            commits: Vec::new(),
+        };
+        let start = if board.is_dir() {
+            board
+        } else {
+            board.parent().unwrap_or(board)
+        };
+        let repo = match Repository::discover(start) {
+            Ok(repo) => repo,
+            Err(error) if error.code() == ErrorCode::NotFound => return Ok(empty(false)),
+            Err(error) => return Err(error).context("Failed to open the board's Git repository"),
+        };
+        let Some(workdir) = repo.workdir() else {
+            return Ok(empty(false));
+        };
+        let workdir = workdir
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve {}", workdir.display()))?;
+        let layout = match storage::sharded_root(board) {
+            Some(root) => {
+                let Ok(dir) = root.strip_prefix(&workdir) else {
+                    return Ok(empty(false));
                 };
-
-            // Determine change type
-            let change_type = if task_exists && !task_exists_in_previous {
-                Some(ChangeType::Created)
-            } else if !task_exists && task_exists_in_previous {
-                Some(ChangeType::Deleted)
-            } else if task_exists && task_exists_in_previous {
-                Some(ChangeType::Modified)
-            } else {
-                None
-            };
-
-            if let Some(ct) = change_type {
-                let commit_info = self.commit_to_info(&commit, ct)?;
-                commits.push(commit_info);
-            }
-
-            task_exists_in_previous = task_exists;
-        }
-
-        Ok(TaskHistory { task_id, commits })
-    }
-
-    /// List all tasks that have been deleted (in history but not current)
-    pub fn deleted_tasks(&self) -> Result<Vec<(TaskId, TaskType, String)>> {
-        let mut all_historical_tasks = HashSet::new();
-        let mut current_tasks = HashSet::new();
-
-        // Get current tasks
-        let current_content =
-            std::fs::read_to_string(&self.frump_file).context("Failed to read current frump.md")?;
-        let current_doc = parser::parse(&current_content)?;
-
-        for task in current_doc.tasks.tasks() {
-            current_tasks.insert(task.id);
-        }
-
-        // Collect all historical tasks
-        let mut revwalk = self.repo.revwalk()?;
-        revwalk.push_head()?;
-
-        let mut task_info_map = std::collections::HashMap::new();
-
-        for oid in revwalk {
-            let oid = oid?;
-            let commit = self.repo.find_commit(oid)?;
-
-            if let Ok(content) = self.read_file_at_commit(&commit, &self.frump_file) {
-                if let Ok(doc) = parser::parse(&content) {
-                    for task in doc.tasks.tasks() {
-                        all_historical_tasks.insert(task.id);
-                        // Keep the information from the newest commit that contains the task.
-                        task_info_map
-                            .entry(task.id)
-                            .or_insert_with(|| (task.task_type.clone(), task.subject.clone()));
-                    }
+                // A board directory at the repository root has no sibling inside the repository.
+                let legacy = dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| dir.with_file_name(format!("{name}.md")));
+                Layout::Directory {
+                    dir: dir.to_path_buf(),
+                    legacy,
                 }
             }
+            None => match board.strip_prefix(&workdir) {
+                Ok(path) => Layout::File(path.to_path_buf()),
+                Err(_) => return Ok(empty(false)),
+            },
+        };
+        match repo.head() {
+            Ok(_) => {}
+            Err(error) if error.code() == ErrorCode::UnbornBranch => return Ok(empty(true)),
+            Err(error) => return Err(error).context("Failed to read HEAD"),
         }
 
-        // Find deleted tasks
-        let mut deleted = Vec::new();
-        for id in all_historical_tasks {
-            if !current_tasks.contains(&id) {
-                if let Some((task_type, subject)) = task_info_map.get(&id) {
-                    deleted.push((id, task_type.clone(), subject.clone()));
-                }
-            }
+        let mut reader = SnapshotReader {
+            repo: &repo,
+            layout,
+            snapshots: HashMap::new(),
+            task_files: HashMap::new(),
+        };
+        let mut walk = repo.revwalk()?;
+        walk.push_head()?;
+        walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
+        let mut commits = Vec::new();
+        for oid in walk {
+            let commit = repo.find_commit(oid?)?;
+            let tasks = reader
+                .snapshot(&commit.tree()?)
+                .with_context(|| format!("Failed to read the board in commit {}", commit.id()))?;
+            let author = commit.author().name().unwrap_or("Unknown").to_string();
+            let date = DateTime::from_timestamp(commit.time().seconds(), 0)
+                .ok_or_else(|| anyhow!("Invalid timestamp in commit {}", commit.id()))?;
+            commits.push(CommitSnapshot {
+                oid: commit.id(),
+                parents: commit.parent_ids().collect(),
+                author,
+                date,
+                message: commit.message().unwrap_or("").trim().to_string(),
+                tasks,
+            });
         }
-
-        // Sort by ID
-        deleted.sort_by_key(|(id, _, _)| *id);
-
-        Ok(deleted)
-    }
-
-    /// Read a file from a specific commit
-    fn read_file_at_commit(&self, commit: &Commit, path: &Path) -> Result<String> {
-        let tree = commit.tree()?;
-        let entry = tree
-            .get_path(path)
-            .with_context(|| format!("File {:?} not found in commit {}", path, commit.id()))?;
-
-        let object = entry.to_object(&self.repo)?;
-        let blob = object
-            .as_blob()
-            .ok_or_else(|| anyhow!("Object is not a blob"))?;
-
-        let content = std::str::from_utf8(blob.content())
-            .context("File content is not valid UTF-8")?
-            .to_string();
-
-        Ok(content)
-    }
-
-    /// Convert a commit to TaskCommit info
-    fn commit_to_info(&self, commit: &Commit, change_type: ChangeType) -> Result<TaskCommit> {
-        let author = commit.author();
-        let author_name = author.name().unwrap_or("Unknown").to_string();
-
-        let timestamp = commit.time().seconds();
-        let date =
-            DateTime::from_timestamp(timestamp, 0).ok_or_else(|| anyhow!("Invalid timestamp"))?;
-
-        Ok(TaskCommit {
-            hash: commit.id().to_string(),
-            author: author_name,
-            date,
-            message: commit.message().unwrap_or("").trim().to_string(),
-            change_type,
+        Ok(BoardHistory {
+            in_git: true,
+            commits,
         })
+    }
+
+    /// Whether the board is inside a Git work tree.
+    pub fn in_git(&self) -> bool {
+        self.in_git
+    }
+
+    /// The highest task number any commit of the board has used.
+    pub fn max_id(&self) -> Option<TaskId> {
+        self.commits
+            .iter()
+            .filter_map(|commit| commit.tasks.keys().next_back().copied())
+            .max()
+    }
+
+    /// Whether any commit of the board has task `id`.
+    pub fn contains(&self, id: TaskId) -> bool {
+        self.commits
+            .iter()
+            .any(|commit| commit.tasks.contains_key(&id))
+    }
+
+    /// Task `id` as HEAD has it.
+    pub fn head_task(&self, id: TaskId) -> Option<&Task> {
+        self.commits.first()?.tasks.get(&id)
+    }
+
+    /// The last state of task `id`: its state in the first commit that has it, walking from HEAD
+    /// through its ancestry in topological order (newest commit time first among branches).
+    pub fn last_state(&self, id: TaskId) -> Option<&Task> {
+        self.commits.iter().find_map(|commit| commit.tasks.get(&id))
+    }
+
+    /// Tasks that history has and the current board does not, by number, in their last state.
+    pub fn removed_tasks(&self, current: &crate::FrumpDoc) -> Vec<&Task> {
+        let mut ids: Vec<TaskId> = self
+            .commits
+            .iter()
+            .flat_map(|commit| commit.tasks.keys().copied())
+            .filter(|id| current.tasks.find_by_id(*id).is_none())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids.into_iter()
+            .filter_map(|id| self.last_state(id))
+            .collect()
+    }
+
+    /// The commits that changed task `id`, oldest first.
+    ///
+    /// A commit changed the task when the task's text there differs from its text in every
+    /// parent; a root commit compares with an empty board. The kind compares with the first
+    /// parent. An unrelated commit, or one that changes another task, is not an event.
+    pub fn task_history(&self, id: TaskId) -> TaskHistory {
+        let index: HashMap<Oid, usize> = self
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(position, commit)| (commit.oid, position))
+            .collect();
+        let text = |position: usize| {
+            self.commits[position]
+                .tasks
+                .get(&id)
+                .map(storage::serialize_task)
+        };
+        let mut commits = Vec::new();
+        for position in (0..self.commits.len()).rev() {
+            let commit = &self.commits[position];
+            let current = text(position);
+            let parents: Vec<Option<String>> = commit
+                .parents
+                .iter()
+                .map(|parent| index.get(parent).and_then(|&position| text(position)))
+                .collect();
+            let first_parent = parents.first().cloned().flatten();
+            let changed = if parents.is_empty() {
+                current.is_some()
+            } else {
+                parents.iter().all(|parent| *parent != current)
+            };
+            if !changed {
+                continue;
+            }
+            let change_type = match (&first_parent, &current) {
+                (None, Some(_)) => ChangeType::Created,
+                (Some(_), None) => ChangeType::Deleted,
+                _ => ChangeType::Modified,
+            };
+            commits.push(TaskCommit {
+                hash: commit.oid.to_string(),
+                author: commit.author.clone(),
+                date: commit.date,
+                message: commit.message.clone(),
+                change_type,
+            });
+        }
+        TaskHistory {
+            task_id: id,
+            commits,
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+struct SnapshotReader<'repo> {
+    repo: &'repo Repository,
+    layout: Layout,
+    /// Parsed snapshots by the object id of a board file or a tasks directory.
+    snapshots: HashMap<Oid, Arc<Snapshot>>,
+    /// Parsed task files by blob id, so each distinct task file is parsed once.
+    task_files: HashMap<Oid, Task>,
+}
 
-    #[test]
-    fn test_open_repo() {
-        // This test only works if run in a git repo
-        let result = FrumpRepo::open(".");
-        // Don't assert - might not be in a repo in test environment
-        if result.is_ok() {
-            println!("Successfully opened repository");
+impl SnapshotReader<'_> {
+    fn snapshot(&mut self, tree: &Tree) -> Result<Arc<Snapshot>> {
+        match &self.layout {
+            Layout::File(path) => {
+                let path = path.clone();
+                self.board_file(tree, &path)
+            }
+            Layout::Directory { dir, legacy } => {
+                let (dir, legacy) = (dir.clone(), legacy.clone());
+                // general.md marks the directory layout; before it exists, the board was the
+                // sibling single file (if any).
+                match entry(tree, &dir.join("general.md"))? {
+                    None => {
+                        return match legacy {
+                            Some(legacy) => self.board_file(tree, &legacy),
+                            None => Ok(Arc::default()),
+                        }
+                    }
+                    Some(marker) if marker.kind() != Some(ObjectType::Blob) => {
+                        bail!("{} is not a file", dir.join("general.md").display())
+                    }
+                    Some(_) => {}
+                }
+                let Some(tasks) = entry(tree, &dir.join("tasks"))? else {
+                    return Ok(Arc::default());
+                };
+                if tasks.kind() != Some(ObjectType::Tree) {
+                    bail!("{} is not a directory", dir.join("tasks").display());
+                }
+                if let Some(snapshot) = self.snapshots.get(&tasks.id()) {
+                    return Ok(snapshot.clone());
+                }
+                let tasks_tree = self.repo.find_tree(tasks.id())?;
+                let mut snapshot = Snapshot::new();
+                for file in tasks_tree.iter() {
+                    let Some(name) = file.name() else { continue };
+                    if !name.ends_with(".md") {
+                        continue;
+                    }
+                    if file.kind() != Some(ObjectType::Blob) {
+                        bail!("Task path tasks/{name} is not a file");
+                    }
+                    let task = match self.task_files.get(&file.id()) {
+                        Some(task) => task.clone(),
+                        None => {
+                            let fragment = self.blob_text(file.id(), name)?;
+                            let mut parsed =
+                                parser::parse_tasks(&format!("## Tasks\n\n{fragment}"))
+                                    .with_context(|| format!("Failed to parse task file {name}"))?;
+                            if parsed.len() != 1 {
+                                bail!("Task file {name} must contain exactly one task");
+                            }
+                            let task = parsed.remove(0);
+                            self.task_files.insert(file.id(), task.clone());
+                            task
+                        }
+                    };
+                    snapshot.insert(task.id, task);
+                }
+                let snapshot = Arc::new(snapshot);
+                self.snapshots.insert(tasks.id(), snapshot.clone());
+                Ok(snapshot)
+            }
         }
+    }
+
+    fn board_file(&mut self, tree: &Tree, path: &Path) -> Result<Arc<Snapshot>> {
+        let Some(file) = entry(tree, path)? else {
+            return Ok(Arc::default());
+        };
+        if file.kind() != Some(ObjectType::Blob) {
+            bail!("{} is not a file", path.display());
+        }
+        if let Some(snapshot) = self.snapshots.get(&file.id()) {
+            return Ok(snapshot.clone());
+        }
+        let content = self.blob_text(file.id(), &path.display().to_string())?;
+        let tasks = parser::parse_tasks(&content)
+            .with_context(|| format!("Failed to parse the tasks of {}", path.display()))?;
+        let mut snapshot = Snapshot::new();
+        for task in &tasks {
+            snapshot.entry(task.id).or_insert_with(|| task.clone());
+        }
+        let snapshot = Arc::new(snapshot);
+        self.snapshots.insert(file.id(), snapshot.clone());
+        Ok(snapshot)
+    }
+
+    fn blob_text(&self, oid: Oid, name: &str) -> Result<String> {
+        let blob = self.repo.find_blob(oid)?;
+        String::from_utf8(blob.content().to_vec())
+            .with_context(|| format!("{name} is not valid UTF-8"))
+    }
+}
+
+/// The tree entry at `path`, or `None` when the path does not exist in this commit.
+fn entry(tree: &Tree, path: &Path) -> Result<Option<git2::TreeEntry<'static>>> {
+    match tree.get_path(path) {
+        Ok(entry) => Ok(Some(entry)),
+        Err(error) if error.code() == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("Failed to read {}", path.display())),
     }
 }

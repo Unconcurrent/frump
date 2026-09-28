@@ -214,6 +214,8 @@
     border-block-end-color: color-mix(in srgb, var(--err-fg) 30%, transparent);
   }
   .notice button { margin-inline-start: auto; }
+  /* A closed task's recovery text keeps its lines so it can be copied back as written. */
+  .notice > span { white-space: pre-wrap; overflow-wrap: anywhere; max-block-size: 40vh; overflow: auto; }
 }
 
 @layer board {
@@ -2195,8 +2197,12 @@ $('#delete').onclick = async () => {
     notice('Task ' + id + ' was not deleted.', 'error', true);
     return;                       /* the task is still there, so the view stays on it */
   }
+  /* Delete is frump close; a task whose current text HEAD does not hold comes back as a
+     warning with that text, and it stays on screen until the user dismisses it. */
+  const { warning } = await r.json();
   closeEditor(true);
   await load();
+  if (warning) notice(warning, 'warn', true);
   announce('Task ' + id + ' deleted');
 };
 form.onsubmit = async e => {

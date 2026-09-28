@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::domain::*;
 
@@ -11,7 +11,8 @@ pub struct ExportTask {
     pub task_type: String,
     pub subject: String,
     pub body: String,
-    pub properties: HashMap<String, String>,
+    /// Keeps the order of the properties in the task file.
+    pub properties: IndexMap<String, String>,
 }
 
 /// Serializable team member for export
@@ -97,9 +98,10 @@ impl ExportDoc {
                 task.set_body(t.body.clone());
 
                 for (key, value) in &t.properties {
-                    if let Ok(prop_key) = PropertyKey::new(key) {
-                        task.add_property(prop_key, value.clone());
-                    }
+                    let prop_key = PropertyKey::new(key).with_context(|| {
+                        format!("Task {} has an invalid property key '{}'", t.id, key)
+                    })?;
+                    task.add_property(prop_key, value.clone());
                 }
 
                 Ok(task)
@@ -186,6 +188,42 @@ mod tests {
 
         assert_eq!(imported.tasks.len(), 1);
         assert_eq!(imported.tasks.tasks()[0].subject, "test");
+    }
+
+    #[test]
+    fn json_keeps_the_property_order_of_the_task_file() {
+        let mut task = Task::new(TaskId::new(1).unwrap(), TaskType::Task, "test".to_string());
+        let keys = [
+            "Status",
+            "Priority",
+            "Depends On",
+            "Assigned To",
+            "Tags",
+            "Last Updated",
+        ];
+        for (index, key) in keys.iter().enumerate() {
+            task.add_property(PropertyKey::new(key).unwrap(), index.to_string());
+        }
+        let doc = FrumpDoc::new(
+            "# Test\n".to_string(),
+            Team::empty(),
+            TaskCollection::new(vec![task]),
+        );
+
+        let json = export_json(&doc).unwrap();
+        let positions: Vec<usize> = keys
+            .iter()
+            .map(|key| json.find(&format!("\"{key}\"")).unwrap())
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{json}");
+
+        let imported = import_json(&json).unwrap();
+        let imported_keys: Vec<&str> = imported.tasks.tasks()[0]
+            .properties
+            .iter()
+            .map(|p| p.key.as_str())
+            .collect();
+        assert_eq!(imported_keys, keys);
     }
 
     #[test]

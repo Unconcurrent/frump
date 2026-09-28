@@ -20,7 +20,7 @@ Welcome to Frump! This tutorial will walk you through setting up and using Frump
 
 ### Authority workflow commands
 
-Use `frump init` to create an empty board, `frump unset` to remove stale properties, and `frump update --append-body` to retain review or validation evidence. `frump update --append-body-notify` also sends the raw fragment to the task's assignee through Metateam after saving, or to the whole crew when the task has no assignee. `frump update --append-body-msg` broadcasts the raw fragment to the whole Metateam crew. Dependency properties use `Depends On: 1, 2`; run `frump validate`, `frump deps`, `frump dependents`, and `frump ready` to work safely with the dependency graph. `frump next 1 2` activates an ordered todo plan: only task 1 may leave `todo`, and completing it removes it from the plan. New statuses and similar new task subjects produce warnings but remain user-controlled.
+Every frump option has a long name, and the only unnamed argument a command takes is the task number. Use `frump init` to create an empty board, `frump unset N --property NAME` to remove stale properties, and `frump update N --append TEXT` to retain review or validation evidence. `--notify assignee` also sends the raw text to the task's assignee through Metateam after saving, or to the whole crew when the task has no assignee; `--notify all` broadcasts it to the whole Metateam crew. Dependency properties use `Depends On: 1, 2`; run `frump validate`, `frump depends-on`, `frump dependents`, and `frump ready` to work safely with the dependency graph. `frump next --set 1 2` activates an ordered todo plan: only task 1 may leave `todo`, and completing it removes it from the plan. New statuses and similar new task subjects produce warnings but remain user-controlled.
 
 ### Step 1: Build Frump
 
@@ -98,21 +98,21 @@ Let's add tasks for building our web app:
 
 ```bash
 # Add a basic task (assigned to first team member by default)
-frump add "Set up project structure"
+frump add --subject "Set up project structure"
 
 # Add a feature with description
-frump add -t Feature "Create user registration" \
-  -b "Users should be able to register with email and password"
+frump add --type Feature --subject "Create user registration" \
+  --body "Users should be able to register with email and password"
 
 # Add a bug (even though we haven't started coding yet!)
-frump add -t Bug "Fix login redirect issue" \
-  -b "Users are redirected to wrong page after login" \
-  -a "Bob Smith"
+frump add --type Bug --subject "Fix login redirect issue" \
+  --body "Users are redirected to wrong page after login" \
+  --assignee "Bob Smith"
 
 # Add a task with status
-frump add "Write API documentation" \
-  -s "planned" \
-  -a "Alice Johnson"
+frump add --subject "Write API documentation" \
+  --status "planned" \
+  --assignee "Alice Johnson"
 ```
 
 ### Step 5: View Your Tasks
@@ -155,7 +155,7 @@ Let's say Alice starts working on task 1:
 
 ```bash
 # Update the status
-frump set 1 Status working
+frump set 1 --property Status --value working
 
 # Check the change
 frump show 1
@@ -175,10 +175,10 @@ Add more information as you work:
 
 ```bash
 # Set priority
-frump set 1 Priority high
+frump set 1 --property Priority --value high
 
 # Set due date
-frump set 1 "Due Date" "2025-12-01"
+frump set 1 --property "Due Date" --value "2025-12-01"
 
 # Update the body with more details
 frump update 1 --body "Set up project structure including:
@@ -195,12 +195,15 @@ frump show 1
 When you finish a task:
 
 ```bash
+# Mark it done and commit, so history keeps the final text
+frump set 1 --property Status --value done
+frump commit --message "Finish task 1"
+
 # Close the task
 frump close 1
 
 # Commit with a descriptive message
-git add frump.md
-git commit -m "Complete task 1: Project structure set up"
+frump commit --message "Complete task 1: Project structure set up"
 ```
 
 ## Part 4: Filtering and Searching
@@ -209,26 +212,26 @@ git commit -m "Complete task 1: Project structure set up"
 
 ```bash
 # See only bugs
-frump list -t Bug
+frump list --type Bug
 
 # See what Alice is working on
-frump list -a "Alice Johnson"
+frump list --assignee "Alice Johnson"
 
 # See all tasks with status "working"
-frump list -s working
+frump list --status working
 
 # Combine filters: bugs assigned to Bob
-frump list -t Bug -a "Bob Smith"
+frump list --type Bug --assignee "Bob Smith"
 ```
 
 ### Step 11: Search for Tasks
 
 ```bash
-# Search in task subjects
-frump search "registration"
+# Search in task subjects and bodies
+frump search --text "registration"
 
-# Search in both subject and body
-frump search "login" --full
+# Also print the start of each matching body
+frump search --text "login" --show-body
 ```
 
 ### Step 12: Get Statistics
@@ -288,7 +291,7 @@ History for Task 1:
 
 ```bash
 # See all tasks you've completed
-frump closed
+frump list --closed
 ```
 
 Output:
@@ -308,9 +311,9 @@ Let's create a template for bug reports:
 
 ```bash
 # Create bug template
-frump template add bug "Fix {component} bug" \
-  -t Bug \
-  -b "Bug found in {component}.
+frump template add --name bug --subject "Fix {component} bug" \
+  --type Bug \
+  --body "Bug found in {component}.
 
 Steps to reproduce:
 {steps}
@@ -330,10 +333,18 @@ frump template list
 Now when you find a bug:
 
 ```bash
-# Note: Template instantiation would require extending the add command
-# For now, templates are stored and can be viewed
-frump template show bug
+# See what the template needs
+frump template show --name bug
+
+# Create a task from it; every {placeholder} needs a --fill
+frump add --template bug \
+  --fill component=login \
+  --fill steps="Log in with a new account" \
+  --fill expected="The dashboard opens" \
+  --fill actual="The settings page opens"
 ```
+
+The template file `.frump_templates.json` sits next to `frump.md`; commit it so the team shares the templates.
 
 ### Step 17: Bulk Operations
 
@@ -341,16 +352,15 @@ Let's say you finish multiple tasks at once:
 
 ```bash
 # First, mark them as done
-frump set 2 Status done
-frump set 3 Status done
-frump set 4 Status done
+frump set 2 --property Status --value done
+frump set 3 --property Status --value done
+frump set 4 --property Status --value done
 
-# Close all done tasks at once
-frump bulk close-by-status done
+# Close all done tasks at once (nothing closes if one of them is not ready)
+frump bulk close --with-status done
 
 # Commit
-git add frump.md
-git commit -m "Close all completed tasks"
+frump commit --message "Close all completed tasks"
 ```
 
 ### Step 18: Export Your Tasks
@@ -359,10 +369,10 @@ Backup or share your tasks:
 
 ```bash
 # Export to JSON
-frump export -o backup.json
+frump export --to backup.json
 
 # Export to CSV for spreadsheet
-frump export -f csv -o tasks.csv
+frump export --format csv --to tasks.csv
 ```
 
 ## Part 7: Team Collaboration
@@ -377,11 +387,11 @@ In real projects with multiple team members, you might get ID conflicts:
 git checkout -b feature/new-tasks
 
 # 2. Add a task
-frump add "Implement caching" -t Feature
+frump add --subject "Implement caching" --type Feature
 
 # 3. Go back to main and add a different task
 git checkout main
-frump add "Add error handling" -t Task
+frump add --subject "Add error handling" --type Task
 
 # 4. Merge the branch
 git merge feature/new-tasks
@@ -392,10 +402,10 @@ git merge feature/new-tasks
 
 ```bash
 # Check for conflicts
-frump check-conflicts
+frump validate
 
-# If conflicts found, resolve them
-frump resolve-conflicts --commit
+# If duplicate numbers are found, renumber them
+frump renumber-duplicates --commit
 
 # Verify everything is good
 frump validate
@@ -409,21 +419,21 @@ frump list
 **Morning:**
 ```bash
 # See what you're working on
-frump list -a "Your Name" -s working
+frump list --assignee "Your Name" --status working
 
 # Review all open tasks
-frump list -s open
+frump list --status open
 ```
 
 **During Development:**
 ```bash
 # Found a bug while coding
-frump add -t Bug "Null pointer in user profile" \
-  -b "Error occurs when user has no avatar" \
-  -s "working"
+frump add --type Bug --subject "Null pointer in user profile" \
+  --body "Error occurs when user has no avatar" \
+  --status "working"
 
 # Start working on planned task
-frump set 7 Status working
+frump set 7 --property Status --value working
 
 # Update task as you learn more
 frump update 7 --body "Additional details discovered during implementation..."
@@ -432,26 +442,28 @@ frump update 7 --body "Additional details discovered during implementation..."
 **Code Review:**
 ```bash
 # Teammate asks for a bug fix
-frump add -t Bug "Memory leak in connection pool" \
-  -a "Teammate Name"
+frump add --type Bug --subject "Memory leak in connection pool" \
+  --assignee "Teammate Name"
 
 # Update task based on review comments
-frump set 10 Priority high
-frump set 10 "Review Status" "changes requested"
+frump set 10 --property Priority --value high
+frump set 10 --property "Review Status" --value "changes requested"
+
+# Record the review and tell the assignee
+frump update 10 --append "Changes requested: see the review notes" --notify assignee
 ```
 
 **End of Day:**
 ```bash
-# Complete finished tasks
+# Complete finished tasks (their Status is done and committed)
 frump close 8
 frump close 9
 
 # Commit your changes
-git add frump.md
-git commit -m "Update tasks: completed #8 and #9"
+frump commit --message "Update tasks: completed #8 and #9"
 
 # See tomorrow's work
-frump list -s working
+frump list --status working
 ```
 
 ## Best Practices
@@ -459,8 +471,7 @@ frump list -s working
 ### 1. Commit Frequently
 Every time you modify frump.md, commit it with a clear message:
 ```bash
-git add frump.md
-git commit -m "Add task 15: Implement notification system"
+frump commit --message "Add task 15: Implement notification system"
 ```
 
 ### 2. Use Descriptive Task Names
@@ -469,8 +480,8 @@ git commit -m "Add task 15: Implement notification system"
 
 ### 3. Add Context in Task Body
 ```bash
-frump add "Optimize database queries" \
-  -b "Current queries are slow for large datasets.
+frump add --subject "Optimize database queries" \
+  --body "Current queries are slow for large datasets.
 Target: < 100ms for 1M records.
 Focus on user search and report generation."
 ```
@@ -488,12 +499,11 @@ Decide on property names as a team:
 ### 6. Regular Cleanup
 ```bash
 # Weekly: close completed tasks
-frump bulk close-by-status done
-git add frump.md
-git commit -m "Weekly cleanup: close completed tasks"
+frump bulk close --with-status done
+frump commit --message "Weekly cleanup: close completed tasks"
 
 # Monthly: export for records
-frump export -o "archive/tasks-$(date +%Y-%m).json"
+frump export --to "archive/tasks-$(date +%Y-%m).json"
 ```
 
 ## Next Steps
@@ -502,35 +512,34 @@ Now that you've completed the tutorial:
 
 1. **Read the [USAGE.md](USAGE.md)** for complete command reference
 2. **Review [README.md](README.md)** for concepts and philosophy
-3. **Check [PLAN.md](PLAN.md)** if you want to contribute
 
 ## Common Questions
 
 ### Q: Can I have multiple frump.md files?
-Yes! Use the `-f` flag:
+Yes! Use `--board`:
 ```bash
-frump --file docs/tasks.md list
-frump -f backend/tasks.md show 5
+frump --board docs/tasks.md list
+frump --board backend/tasks.md show 5
 ```
 
 ### Q: What if I don't use git?
 Frump works without git, but you'll lose:
 - Task history (`frump history`)
-- Closed task list (`frump closed`)
+- Closed task list (`frump list --closed`)
 - Automatic ID conflict prevention
 
 ### Q: Can I customize the task types?
 Yes! Use any type you want:
 ```bash
-frump add -t Chore "Update dependencies"
-frump add -t Documentation "Write API guide"
+frump add --type Chore --subject "Update dependencies"
+frump add --type Documentation --subject "Write API guide"
 ```
 
 ### Q: How do I recover a deleted task?
 Check git history:
 ```bash
-# See closed tasks
-frump closed
+# See closed tasks, in their last committed state
+frump list --closed
 
 # View when it was closed
 frump history <task_id>
@@ -546,11 +555,11 @@ Yes! Frump is scriptable:
 ```bash
 # Add tasks from a script
 for feature in feature1 feature2 feature3; do
-  frump add -t Feature "Implement $feature"
+  frump add --type Feature --subject "Implement $feature"
 done
 
 # Export for CI/CD
-frump export -o tasks.json
+frump export --to tasks.json
 # Process tasks.json in your pipeline
 ```
 
@@ -582,12 +591,12 @@ Property keys must:
 
 ```bash
 # Wrong:
-frump set 1 priority high           # lowercase
-frump set 1 "expected completion date" "2025-12-31"  # 3+ words
+frump set 1 --property priority --value high           # lowercase
+frump set 1 --property "expected completion date" --value "2025-12-31"  # 3+ words
 
 # Right:
-frump set 1 Priority high
-frump set 1 "Due Date" "2025-12-31"
+frump set 1 --property Priority --value high
+frump set 1 --property "Due Date" --value "2025-12-31"
 ```
 
 ## Congratulations!

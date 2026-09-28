@@ -35,11 +35,13 @@ fn cli_updates_only_the_changed_sharded_task() {
 
     let set = Command::new(binary)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "set",
             "1",
+            "--property",
             "Status",
+            "--value",
             "done",
         ])
         .output()
@@ -58,7 +60,7 @@ fn cli_updates_only_the_changed_sharded_task() {
     assert!(!root.join("frump/.frump.lock").exists());
 
     let list = Command::new(binary)
-        .args(["--file", board.to_str().unwrap(), "list"])
+        .args(["--board", board.to_str().unwrap(), "list"])
         .output()
         .unwrap();
     assert!(list.status.success());
@@ -90,11 +92,13 @@ fn sharded_commit_tracks_task_data_without_a_lock_file() {
     let binary = env!("CARGO_BIN_EXE_frump");
     let set = Command::new(binary)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "set",
             "1",
+            "--property",
             "Status",
+            "--value",
             "done",
         ])
         .output()
@@ -109,10 +113,10 @@ fn sharded_commit_tracks_task_data_without_a_lock_file() {
     let commit = Command::new(binary)
         .current_dir(&root)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "commit",
-            "-m",
+            "--message",
             "Update task",
         ])
         .output()
@@ -178,7 +182,7 @@ fn migrate_replaces_the_source_with_a_verified_sharded_board() {
     let root = unique_root("migrate");
     let source = single_file_board(&root);
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
-        .args(["--file", source.to_str().unwrap(), "migrate"])
+        .args(["--board", source.to_str().unwrap(), "migrate"])
         .output()
         .unwrap();
     assert!(
@@ -192,7 +196,7 @@ fn migrate_replaces_the_source_with_a_verified_sharded_board() {
     assert!(sharded.join("tasks/1.md").is_file());
     let list = Command::new(env!("CARGO_BIN_EXE_frump"))
         .args([
-            "--file",
+            "--board",
             sharded.to_str().unwrap(),
             "list",
             "--format",
@@ -232,7 +236,7 @@ fn commit_after_migration_stages_the_removed_single_file() {
     }
     let binary = env!("CARGO_BIN_EXE_frump");
     let migrated = Command::new(binary)
-        .args(["--file", source.to_str().unwrap(), "migrate"])
+        .args(["--board", source.to_str().unwrap(), "migrate"])
         .output()
         .unwrap();
     assert!(
@@ -245,10 +249,10 @@ fn commit_after_migration_stages_the_removed_single_file() {
     let committed = Command::new(binary)
         .current_dir(&root)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "commit",
-            "-m",
+            "--message",
             "Migrate board",
         ])
         .output()
@@ -277,7 +281,7 @@ fn migrate_refuses_an_existing_destination_without_touching_the_source() {
     let original = fs::read(&source).unwrap();
     fs::create_dir(root.join("frump")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
-        .args(["--file", source.to_str().unwrap(), "migrate"])
+        .args(["--board", source.to_str().unwrap(), "migrate"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -291,7 +295,7 @@ fn list_filters_sorts_and_emits_machine_readable_tasks() {
     let board = single_file_board(&root);
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "list",
             "--property",
@@ -327,7 +331,7 @@ fn ready_omits_completed_tasks_and_keeps_unblocked_work() {
     .unwrap();
 
     let ready = Command::new(env!("CARGO_BIN_EXE_frump"))
-        .args(["--file", board.to_str().unwrap(), "ready"])
+        .args(["--board", board.to_str().unwrap(), "ready"])
         .output()
         .unwrap();
     assert!(
@@ -351,7 +355,7 @@ fn update_refuses_empty_body_and_requires_an_explicit_clear() {
 
     let empty = Command::new(binary)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "1",
@@ -366,7 +370,7 @@ fn update_refuses_empty_body_and_requires_an_explicit_clear() {
 
     let set = Command::new(binary)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "1",
@@ -382,7 +386,7 @@ fn update_refuses_empty_body_and_requires_an_explicit_clear() {
 
     let clear = Command::new(binary)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "1",
@@ -411,7 +415,7 @@ fn body_replacement_stays_a_replacement_and_appends_after_the_complete_body() {
     for body in ["First replacement", "Second replacement"] {
         let update = Command::new(binary)
             .args([
-                "--file",
+                "--board",
                 board.to_str().unwrap(),
                 "update",
                 "4",
@@ -434,11 +438,11 @@ fn body_replacement_stays_a_replacement_and_appends_after_the_complete_body() {
 
     let append = Command::new(binary)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "4",
-            "--append-body",
+            "--append",
             "Dated evidence",
         ])
         .output()
@@ -449,9 +453,82 @@ fn body_replacement_stays_a_replacement_and_appends_after_the_complete_body() {
         String::from_utf8_lossy(&append.stderr)
     );
     let appended = fs::read_to_string(&board).unwrap();
-    assert!(appended.find("Second replacement").unwrap() < appended.find("_Update ").unwrap());
-    assert!(appended.find("_Update ").unwrap() < appended.find("Dated evidence").unwrap());
+    assert!(appended.find("Second replacement").unwrap() < appended.find("\nUpdate ").unwrap());
+    assert!(appended.find("\nUpdate ").unwrap() < appended.find("Dated evidence").unwrap());
     assert_eq!(appended.matches("Second replacement").count(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn plain_update_stamp_keeps_old_italic_stamps_and_properties_intact() {
+    let root = unique_root("stamp-compat");
+    let board = root.join("frump.md");
+    let old_body = "Framing text.\n\n_Update 2026-08-24T09:00:00Z — data_\n\nOld evidence.";
+    fs::write(
+        &board,
+        format!(
+            "# Check\n\n## Tasks\n\n### Task 1 - Old record\n\n{old_body}\n\nStatus: todo\nPriority: 2\n\n### Task 2 - Empty body\n\nStatus: todo\n"
+        ),
+    )
+    .unwrap();
+    let binary = env!("CARGO_BIN_EXE_frump");
+
+    for (id, text) in [("1", "New evidence"), ("2", "First evidence")] {
+        let append = Command::new(binary)
+            .args([
+                "--board",
+                board.to_str().unwrap(),
+                "update",
+                id,
+                "--append",
+                text,
+            ])
+            .env("METATEAM_CREW_AGENT", "data")
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(
+            append.status.success(),
+            "{}",
+            String::from_utf8_lossy(&append.stderr)
+        );
+    }
+
+    let saved = fs::read_to_string(&board).unwrap();
+    assert!(saved.contains(old_body), "{saved}");
+    let doc = frump::parser::parse(&saved).unwrap();
+    let old = doc
+        .tasks
+        .find_by_id(frump::TaskId::new(1).unwrap())
+        .unwrap();
+    let new = doc
+        .tasks
+        .find_by_id(frump::TaskId::new(2).unwrap())
+        .unwrap();
+
+    let (kept, appended) = old.body.split_once("\n\nUpdate ").unwrap();
+    assert_eq!(kept, old_body);
+    let (stamp, text) = appended.split_once("\n\n").unwrap();
+    assert!(
+        stamp.ends_with("Z - data") && !stamp.contains('_'),
+        "{stamp}"
+    );
+    assert_eq!(text, "New evidence");
+    assert!(new.body.starts_with("Update "));
+    assert!(
+        new.body.ends_with(" - data\n\nFirst evidence"),
+        "{}",
+        new.body
+    );
+
+    let keys = |task: &frump::Task| {
+        task.properties
+            .iter()
+            .map(|p| p.key.as_str().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(old), ["Status", "Priority", "Last Updated"]);
+    assert_eq!(keys(new), ["Status", "Last Updated"]);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -461,17 +538,26 @@ fn next_blocks_out_of_order_todo_transitions_and_prunes_done_work() {
     let board = single_file_board(&root);
     let bin = env!("CARGO_BIN_EXE_frump");
     let set = Command::new(bin)
-        .args(["--file", board.to_str().unwrap(), "next", "1", "2"])
+        .args([
+            "--board",
+            board.to_str().unwrap(),
+            "next",
+            "--set",
+            "1",
+            "2",
+        ])
         .output()
         .unwrap();
     assert!(set.status.success());
     let blocked = Command::new(bin)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "set",
             "2",
+            "--property",
             "Status",
+            "--value",
             "working",
         ])
         .output()
@@ -479,17 +565,26 @@ fn next_blocks_out_of_order_todo_transitions_and_prunes_done_work() {
     assert!(!blocked.status.success());
     assert!(String::from_utf8_lossy(&blocked.stderr).contains("not the next planned task"));
     let unset_blocked = Command::new(bin)
-        .args(["--file", board.to_str().unwrap(), "unset", "2", "Status"])
+        .args([
+            "--board",
+            board.to_str().unwrap(),
+            "unset",
+            "2",
+            "--property",
+            "Status",
+        ])
         .output()
         .unwrap();
     assert!(!unset_blocked.status.success());
     assert!(Command::new(bin)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "set",
             "1",
+            "--property",
             "Status",
+            "--value",
             "working"
         ])
         .status()
@@ -497,28 +592,30 @@ fn next_blocks_out_of_order_todo_transitions_and_prunes_done_work() {
         .success());
     assert!(Command::new(bin)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "set",
             "1",
+            "--property",
             "Status",
+            "--value",
             "done"
         ])
         .status()
         .unwrap()
         .success());
     let next = Command::new(bin)
-        .args(["--file", board.to_str().unwrap(), "next"])
+        .args(["--board", board.to_str().unwrap(), "next"])
         .output()
         .unwrap();
     assert_eq!(String::from_utf8(next.stdout).unwrap().trim(), "2");
     assert!(Command::new(bin)
-        .args(["--file", board.to_str().unwrap(), "next", "--clear"])
+        .args(["--board", board.to_str().unwrap(), "next", "--clear"])
         .status()
         .unwrap()
         .success());
     let cleared = Command::new(bin)
-        .args(["--file", board.to_str().unwrap(), "next"])
+        .args(["--board", board.to_str().unwrap(), "next"])
         .output()
         .unwrap();
     assert_eq!(
@@ -535,7 +632,14 @@ fn sharded_next_accepts_mixed_card_types_and_refuses_missing_ids_atomically() {
     let binary = env!("CARGO_BIN_EXE_frump");
 
     let set = Command::new(binary)
-        .args(["--file", board.to_str().unwrap(), "next", "1", "2"])
+        .args([
+            "--board",
+            board.to_str().unwrap(),
+            "next",
+            "--set",
+            "1",
+            "2",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -544,7 +648,7 @@ fn sharded_next_accepts_mixed_card_types_and_refuses_missing_ids_atomically() {
         String::from_utf8_lossy(&set.stderr)
     );
     let listed = Command::new(binary)
-        .args(["--file", board.to_str().unwrap(), "next"])
+        .args(["--board", board.to_str().unwrap(), "next"])
         .output()
         .unwrap();
     assert_eq!(String::from_utf8(listed.stdout).unwrap().trim(), "1\n2");
@@ -552,7 +656,14 @@ fn sharded_next_accepts_mixed_card_types_and_refuses_missing_ids_atomically() {
     let general = board.join("general.md");
     let before = fs::read(&general).unwrap();
     let missing = Command::new(binary)
-        .args(["--file", board.to_str().unwrap(), "next", "1", "999"])
+        .args([
+            "--board",
+            board.to_str().unwrap(),
+            "next",
+            "--set",
+            "1",
+            "999",
+        ])
         .output()
         .unwrap();
     assert!(!missing.status.success());
@@ -563,7 +674,7 @@ fn sharded_next_accepts_mixed_card_types_and_refuses_missing_ids_atomically() {
 
 #[cfg(unix)]
 #[test]
-fn append_body_notify_without_assignee_saves_the_update_and_broadcasts_the_raw_fragment() {
+fn notify_assignee_without_assignee_saves_the_update_and_broadcasts_the_raw_fragment() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = unique_root("append-message");
@@ -583,11 +694,13 @@ fn append_body_notify_without_assignee_saves_the_update_and_broadcasts_the_raw_f
 
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "1",
-            "--append-body-notify",
+            "--notify",
+            "assignee",
+            "--append",
             "Evidence accepted",
         ])
         .env("PATH", &tools)
@@ -614,7 +727,7 @@ fn append_body_notify_without_assignee_saves_the_update_and_broadcasts_the_raw_f
 
 #[cfg(unix)]
 #[test]
-fn append_body_notify_sends_the_raw_fragment_only_to_the_assignee() {
+fn notify_assignee_sends_the_raw_fragment_only_to_the_assignee() {
     let root = unique_root("append-notify-assignee");
     let board = single_file_board(&root);
     let tools = recording_metateam(&root, "printf 'delivered by test\\n'\n");
@@ -622,11 +735,13 @@ fn append_body_notify_sends_the_raw_fragment_only_to_the_assignee() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "2",
-            "--append-body-notify",
+            "--notify",
+            "assignee",
+            "--append",
             "Evidence for Ada",
         ])
         .env("PATH", &tools)
@@ -660,19 +775,19 @@ fn undeliverable_notifications_warn_and_keep_the_saved_change() {
 
     for (args, expected_target, warning) in [
         (
-            vec!["assign", "1", "John Doe"],
+            vec!["assign", "1", "--assignee", "John Doe"],
             "John Doe",
             "Warning: Metateam could not send assignment announcement: unknown recipient. The task change is saved.",
         ),
         (
-            vec!["update", "2", "--append-body-notify", "Kept evidence"],
+            vec!["update", "2", "--notify", "assignee", "--append", "Kept evidence"],
             "Ada",
             "Warning: Metateam could not send message: unknown recipient. The task change is saved.",
         ),
     ] {
         let _ = fs::remove_file(&arguments);
         let output = Command::new(binary)
-            .args(["--file", board.to_str().unwrap()])
+            .args(["--board", board.to_str().unwrap()])
             .args(&args)
             .env("PATH", &tools)
             .env("FRUMP_MESSAGE_ARGS", &arguments)
@@ -697,7 +812,7 @@ fn undeliverable_notifications_warn_and_keep_the_saved_change() {
 
 #[cfg(unix)]
 #[test]
-fn append_body_msg_broadcasts_to_the_whole_crew_even_with_an_assignee() {
+fn notify_all_broadcasts_to_the_whole_crew_even_with_an_assignee() {
     let root = unique_root("append-msg-broadcast");
     let board = single_file_board(&root);
     let tools = recording_metateam(&root, "printf 'delivered by test\\n'\n");
@@ -705,11 +820,13 @@ fn append_body_msg_broadcasts_to_the_whole_crew_even_with_an_assignee() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "2",
-            "--append-body-msg",
+            "--notify",
+            "all",
+            "--append",
             "Evidence for everyone",
         ])
         .env("PATH", &tools)
@@ -735,27 +852,31 @@ fn append_body_msg_broadcasts_to_the_whole_crew_even_with_an_assignee() {
 }
 
 #[test]
-fn append_body_msg_and_append_body_notify_cannot_be_combined() {
-    let root = unique_root("append-msg-notify-conflict");
+fn notify_without_append_is_refused_and_changes_nothing() {
+    let root = unique_root("notify-needs-append");
     let board = single_file_board(&root);
     let before = fs::read(&board).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "1",
-            "--append-body-msg",
-            "One",
-            "--append-body-notify",
-            "Two",
+            "--subject",
+            "Renamed",
+            "--notify",
+            "all",
         ])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--append"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(fs::read(&board).unwrap(), before);
     let _ = fs::remove_dir_all(root);
 }
@@ -784,9 +905,10 @@ fn assignment_changes_are_announced_after_the_board_is_written() {
 
     let added = Command::new(binary)
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "add",
+            "--subject",
             "Fixture",
             "--assignee",
             "Ada",
@@ -813,21 +935,37 @@ fn assignment_changes_are_announced_after_the_board_is_written() {
 
     for args in [
         vec![
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             &id,
             "--body",
             "replacement",
         ],
-        vec!["--file", board.to_str().unwrap(), "assign", &id, "Ada"],
-        vec!["--file", board.to_str().unwrap(), "assign", &id, "Bob"],
         vec![
-            "--file",
+            "--board",
+            board.to_str().unwrap(),
+            "assign",
+            &id,
+            "--assignee",
+            "Ada",
+        ],
+        vec![
+            "--board",
+            board.to_str().unwrap(),
+            "assign",
+            &id,
+            "--assignee",
+            "Bob",
+        ],
+        vec![
+            "--board",
             board.to_str().unwrap(),
             "set",
             &id,
+            "--property",
             "Assigned To",
+            "--value",
             "Carol",
         ],
     ] {
@@ -874,7 +1012,7 @@ fn assignment_changes_are_announced_after_the_board_is_written() {
     assert!(!messages.contains("replacement"));
     assert_eq!(
         Command::new(binary)
-            .args(["--file", board.to_str().unwrap(), "show", &id])
+            .args(["--board", board.to_str().unwrap(), "show", &id])
             .output()
             .unwrap()
             .stdout
@@ -888,7 +1026,7 @@ fn assignment_changes_are_announced_after_the_board_is_written() {
 
 #[cfg(unix)]
 #[test]
-fn append_body_notify_without_metateam_saves_the_update_and_succeeds() {
+fn notify_without_metateam_saves_the_update_and_succeeds() {
     let root = unique_root("append-message-missing");
     let board = single_file_board(&root);
     let empty_path = root.join("no-tools");
@@ -896,11 +1034,13 @@ fn append_body_notify_without_metateam_saves_the_update_and_succeeds() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
         .args([
-            "--file",
+            "--board",
             board.to_str().unwrap(),
             "update",
             "1",
-            "--append-body-notify",
+            "--notify",
+            "assignee",
+            "--append",
             "Evidence accepted without a notification channel",
         ])
         .env("PATH", &empty_path)
@@ -936,7 +1076,14 @@ fn assignment_without_metateam_keeps_the_assignee_and_succeeds() {
     fs::create_dir(&empty_path).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_frump"))
-        .args(["--file", board.to_str().unwrap(), "assign", "1", "Ada"])
+        .args([
+            "--board",
+            board.to_str().unwrap(),
+            "assign",
+            "1",
+            "--assignee",
+            "Ada",
+        ])
         .env("PATH", &empty_path)
         .output()
         .unwrap();
@@ -972,7 +1119,7 @@ fn start_board(
     use std::io::BufRead;
 
     let mut server = Command::new(env!("CARGO_BIN_EXE_frump"))
-        .args(["--file", board.to_str().unwrap(), "web", "--port", "0"])
+        .args(["--board", board.to_str().unwrap(), "web", "--port", "0"])
         .env("PATH", tools)
         .env("FRUMP_MESSAGE_ARGS", arguments)
         .stdout(std::process::Stdio::piped())

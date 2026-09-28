@@ -15,9 +15,14 @@ impl TaskId {
         Ok(TaskId(id))
     }
 
-    /// Get the next sequential task ID
-    pub fn next(&self) -> TaskId {
-        TaskId(self.0 + 1)
+    /// The next sequential task ID, or an error at the largest possible number.
+    pub fn next(&self) -> Result<TaskId> {
+        self.0.checked_add(1).map(TaskId).ok_or_else(|| {
+            anyhow!(
+                "Task number {} is the largest possible; no next number exists",
+                self.0
+            )
+        })
     }
 
     /// Get the raw u32 value
@@ -56,8 +61,9 @@ mod tests {
     #[test]
     fn test_task_id_next() {
         let id = TaskId::new(5).unwrap();
-        let next = id.next();
+        let next = id.next().unwrap();
         assert_eq!(next.value(), 6);
+        assert!(TaskId::new(u32::MAX).unwrap().next().is_err());
     }
 
     #[test]

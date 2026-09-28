@@ -46,13 +46,6 @@ impl TaskCollection {
         self.tasks.iter().map(|t| t.id).max()
     }
 
-    /// Get the next available task ID
-    pub fn next_id(&self) -> TaskId {
-        self.max_id()
-            .map(|id| id.next())
-            .unwrap_or_else(|| TaskId::new(1).unwrap())
-    }
-
     /// Add a task
     pub fn add(&mut self, task: Task) {
         self.tasks.push(task);
@@ -193,19 +186,6 @@ mod tests {
         let collection = TaskCollection::empty();
         assert!(collection.is_empty());
         assert_eq!(collection.len(), 0);
-    }
-
-    #[test]
-    fn test_next_id_empty() {
-        let collection = TaskCollection::empty();
-        assert_eq!(collection.next_id().value(), 1);
-    }
-
-    #[test]
-    fn test_next_id() {
-        let tasks = vec![create_test_task(1, "test"), create_test_task(3, "test2")];
-        let collection = TaskCollection::new(tasks);
-        assert_eq!(collection.next_id().value(), 4);
     }
 
     #[test]

@@ -1,15 +1,23 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
+use frump::board::{
+    allocate_task_ids, apply_close, dependency_ids, ensure_outside_board, is_ready, next_task_id,
+    prepare_close, prerequisites, resolve_board, templates_file, validate_dependencies,
+    CloseResult, Prerequisite,
+};
+use frump::templates::parse_pairs;
 use frump::{
     announce_assignment, append_update, export_csv, export_json, import_json, mark_updated,
     notification_warning, notify_task_update, now_utc, send_metateam_message, storage,
-    validate_property_value, ChangeType, FrumpRepo, PropertyKey, Task, TaskId, TaskTemplate,
+    validate_property_value, BoardHistory, ChangeType, PropertyKey, Task, TaskId, TaskTemplate,
     TaskType, TemplateManager, LAST_UPDATED_PROPERTY,
 };
+use indexmap::IndexMap;
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -19,14 +27,10 @@ use serde::Serialize;
     after_help = "AI agents: run `frump usage` for the complete usage guide.\nBuild from source with `cargo build --release`."
 )]
 struct Cli {
-    #[arg(
-        short,
-        long,
-        global = true,
-        default_value = ".",
-        hide_default_value = true
-    )]
-    file: PathBuf,
+    /// The task board: a board file, or a board directory
+    /// (default: frump.md or frump/ found from the current directory upward)
+    #[arg(long, global = true, value_name = "PATH")]
+    board: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -47,22 +51,22 @@ enum Commands {
     /// Commit the tracked task file with a short Git message
     Commit {
         /// Commit message
-        #[arg(short, long, default_value = "Update frump tasks")]
+        #[arg(long, default_value = "Update frump tasks")]
         message: String,
     },
 
-    /// List all tasks
+    /// List tasks, or closed tasks with --closed
     List {
         /// Filter by task type
-        #[arg(short = 't', long)]
+        #[arg(long = "type", value_name = "TYPE")]
         task_type: Option<String>,
 
         /// Filter by status
-        #[arg(short = 's', long)]
+        #[arg(long)]
         status: Option<String>,
 
         /// Filter by assignee
-        #[arg(short = 'a', long)]
+        #[arg(long)]
         assignee: Option<String>,
 
         /// Require an exact property key and value, for example `Review=approved`
@@ -84,22 +88,27 @@ enum Commands {
         /// Emit a JSON array of matching tasks
         #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
+
+        /// List tasks that Git history has and the board no longer has, in their last state
+        #[arg(long, conflicts_with_all = ["status", "assignee", "property", "missing", "sort"])]
+        closed: bool,
     },
 
     /// Replace a single Markdown board with a verified sharded board
     Migrate {
-        /// Destination directory (defaults to the source filename without .md)
-        #[arg(long)]
-        output: Option<PathBuf>,
+        /// Destination directory (default: the source file name without .md, next to it)
+        #[arg(long, value_name = "DIR")]
+        to: Option<PathBuf>,
     },
 
     /// Show the ordered task IDs allowed to leave todo, or replace the list
     Next {
-        /// Replace the current ordered list with these task IDs; omit IDs to show it
-        ids: Vec<u32>,
+        /// Replace the ordered list with these task IDs
+        #[arg(long, value_name = "ID", num_args = 1.., conflicts_with = "clear")]
+        set: Option<Vec<u32>>,
 
         /// Remove every task from the ordered plan
-        #[arg(long, conflicts_with = "ids")]
+        #[arg(long)]
         clear: bool,
     },
 
@@ -110,28 +119,38 @@ enum Commands {
     },
 
     /// Add a new task
+    #[command(group(ArgGroup::new("source").required(true).args(["subject", "template"])))]
     Add {
-        /// Task type (e.g., Task, Bug, Issue, Feature)
-        #[arg(short = 't', long, default_value = "Task")]
-        task_type: String,
-
         /// Task subject/title
-        subject: String,
+        #[arg(long)]
+        subject: Option<String>,
 
-        /// Task body/description (optional)
-        #[arg(short, long)]
+        /// Task type, for example Task, Bug, Issue or Feature (default: Task, or the template's)
+        #[arg(long = "type", value_name = "TYPE")]
+        task_type: Option<String>,
+
+        /// Task body/description
+        #[arg(long)]
         body: Option<String>,
 
-        /// Assignee name (optional)
-        #[arg(short, long)]
+        /// Assignee name
+        #[arg(long)]
         assignee: Option<String>,
 
-        /// Status (optional)
-        #[arg(short, long)]
+        /// Status
+        #[arg(long)]
         status: Option<String>,
+
+        /// Create the task from this template
+        #[arg(long, value_name = "NAME")]
+        template: Option<String>,
+
+        /// Value for a template placeholder {KEY}; repeat for each placeholder
+        #[arg(long, value_name = "KEY=VALUE", requires = "template")]
+        fill: Vec<String>,
     },
 
-    /// Close a task by removing it from frump.md
+    /// Close a done task by removing it from the board
     Close {
         /// Task ID
         id: u32,
@@ -143,6 +162,7 @@ enum Commands {
         id: u32,
 
         /// Assignee name
+        #[arg(long)]
         assignee: String,
     },
 
@@ -152,14 +172,23 @@ enum Commands {
         id: u32,
 
         /// Property name (must be capitalized, max 3 words)
+        #[arg(long)]
         property: String,
 
         /// Property value
+        #[arg(long)]
         value: String,
     },
 
     /// Remove a property from a task, including Status
-    Unset { id: u32, property: String },
+    Unset {
+        /// Task ID
+        id: u32,
+
+        /// Property name
+        #[arg(long)]
+        property: String,
+    },
 
     /// Show the history of a task
     History {
@@ -167,54 +196,54 @@ enum Commands {
         id: u32,
     },
 
-    /// List all closed (deleted) tasks
-    Closed,
-
     /// Update a task's subject or body
+    #[command(group(
+        ArgGroup::new("change")
+            .required(true)
+            .multiple(true)
+            .args(["subject", "body", "clear_body", "append"])
+    ))]
     Update {
         /// Task ID
         id: u32,
 
-        /// New subject (optional)
+        /// New subject
         #[arg(long)]
         subject: Option<String>,
 
-        /// Replacement body (optional)
-        #[arg(long, conflicts_with = "clear_body")]
+        /// Replacement body
+        #[arg(long, conflicts_with_all = ["clear_body", "append"])]
         body: Option<String>,
 
         /// Explicitly remove the current body
-        #[arg(long, conflicts_with_all = ["append_body", "append_body_notify", "append_body_msg"])]
+        #[arg(long, conflicts_with = "append")]
         clear_body: bool,
 
-        /// Append text to the task body instead of replacing it
-        #[arg(long, conflicts_with_all = ["body", "clear_body"])]
-        append_body: Option<String>,
+        /// Append a dated update to the task body
+        #[arg(long, value_name = "TEXT")]
+        append: Option<String>,
 
-        /// Append text to the task body and notify the task's assignee through Metateam
-        /// (every crew member when the task has no assignee)
-        #[arg(long, conflicts_with_all = ["body", "clear_body", "append_body"])]
-        append_body_notify: Option<String>,
-
-        /// Append text to the task body and notify every Metateam crew member
-        #[arg(long, conflicts_with_all = ["body", "clear_body", "append_body", "append_body_notify"])]
-        append_body_msg: Option<String>,
+        /// After saving, send the appended text through Metateam: to the task's assignees
+        /// (every crew member when the task has no assignee), or to every crew member
+        #[arg(long, value_enum, requires = "append")]
+        notify: Option<NotifyTarget>,
     },
 
     /// Search tasks by keyword
     Search {
-        /// Search query
-        query: String,
+        /// Search text, matched against subject and body
+        #[arg(long)]
+        text: String,
 
-        /// Search in body as well as subject
-        #[arg(short, long)]
-        full: bool,
+        /// Print the start of each matching task's body
+        #[arg(long)]
+        show_body: bool,
     },
 
     /// Show task statistics
     Stats,
 
-    /// Validate frump.md file
+    /// Validate the task board
     Validate,
 
     /// Create a new empty Frump board
@@ -223,33 +252,44 @@ enum Commands {
         title: String,
     },
 
-    /// Show the dependency tree for a task
-    Deps { id: u32 },
+    /// Show the prerequisite tree for a task
+    DependsOn {
+        /// Task ID
+        id: u32,
+    },
 
     /// List active tasks that depend on a task
-    Dependents { id: u32 },
+    Dependents {
+        /// Task ID
+        id: u32,
+    },
 
-    /// List tasks whose active dependencies are satisfied
+    /// List tasks whose prerequisites are satisfied
     Ready,
 
     /// Export tasks to JSON or CSV
     Export {
         /// Output format
-        #[arg(short, long, default_value = "json")]
+        #[arg(long, default_value = "json", value_parser = ["json", "csv"])]
         format: String,
 
         /// Output file (stdout if not specified)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        to: Option<PathBuf>,
     },
 
-    /// Import tasks from JSON
+    /// Import tasks from a JSON export into the board
     Import {
-        /// Input file
-        file: PathBuf,
+        /// The JSON file to import
+        #[arg(long, value_name = "PATH")]
+        from: PathBuf,
 
-        /// Merge with existing tasks instead of replacing
-        #[arg(short, long)]
+        /// The board to import into (default: the board found as for every command)
+        #[arg(long, value_name = "BOARD")]
+        to: Option<PathBuf>,
+
+        /// Add the tasks to the existing board with new numbers instead of replacing it
+        #[arg(long)]
         merge: bool,
     },
 
@@ -265,15 +305,20 @@ enum Commands {
         action: BulkAction,
     },
 
-    /// Check for duplicate task IDs (merge conflicts)
-    CheckConflicts,
-
-    /// Resolve duplicate task IDs by renumbering
-    ResolveConflicts {
-        /// Automatically commit the resolution
-        #[arg(short, long)]
+    /// Give duplicate task numbers new numbers (after a merge)
+    RenumberDuplicates {
+        /// Commit the board after renumbering
+        #[arg(long)]
         commit: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum NotifyTarget {
+    /// The task's assignees, or every crew member when the task has no assignee
+    Assignee,
+    /// Every crew member
+    All,
 }
 
 #[derive(Subcommand)]
@@ -281,18 +326,24 @@ enum TemplateAction {
     /// Add a new template
     Add {
         /// Template name
+        #[arg(long)]
         name: String,
 
         /// Task type
-        #[arg(short = 't', long, default_value = "Task")]
+        #[arg(long = "type", value_name = "TYPE", default_value = "Task")]
         task_type: String,
 
-        /// Subject template (use {placeholder} for variables)
+        /// Subject template (use {placeholder} for values given with add --fill)
+        #[arg(long)]
         subject: String,
 
-        /// Body template (optional)
-        #[arg(short, long)]
+        /// Body template
+        #[arg(long)]
         body: Option<String>,
+
+        /// A property of every task from this template; repeat for each property
+        #[arg(long, value_name = "KEY=VALUE")]
+        property: Vec<String>,
     },
 
     /// List all templates
@@ -301,57 +352,93 @@ enum TemplateAction {
     /// Remove a template
     Remove {
         /// Template name
+        #[arg(long)]
         name: String,
     },
 
     /// Show template details
     Show {
         /// Template name
+        #[arg(long)]
         name: String,
     },
 }
 
 #[derive(Subcommand)]
 enum BulkAction {
-    /// Close multiple tasks by status
-    CloseByStatus {
-        /// Status to close
-        status: String,
+    /// Close every task with this status
+    Close {
+        /// Select tasks with this status
+        #[arg(long)]
+        with_status: String,
     },
 
-    /// Assign multiple tasks to a person
-    AssignByType {
-        /// Task type to assign
-        task_type: String,
+    /// Assign every task of this type
+    Assign {
+        /// Select tasks of this type
+        #[arg(long, value_name = "TYPE")]
+        with_type: String,
 
         /// Assignee name
+        #[arg(long)]
         assignee: String,
     },
 
-    /// Set property on multiple tasks
-    SetByStatus {
-        /// Status to filter
-        status: String,
+    /// Set a property on every task with this status
+    Set {
+        /// Select tasks with this status
+        #[arg(long)]
+        with_status: String,
 
-        /// Property to set
+        /// Property name
+        #[arg(long)]
         property: String,
 
         /// Property value
+        #[arg(long)]
         value: String,
     },
 }
 
+/// Long names only: clap's `-h` is replaced by `--help` on every command.
+fn long_help_only(command: clap::Command) -> clap::Command {
+    command
+        .disable_help_flag(true)
+        .arg(
+            clap::Arg::new("help")
+                .long("help")
+                .action(clap::ArgAction::Help)
+                .help("Print help"),
+        )
+        .mut_subcommands(long_help_only)
+}
+
+fn parse_cli() -> Cli {
+    let matches = long_help_only(Cli::command()).get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut cli = Cli::parse();
-    if cli.file == Path::new(".") {
-        cli.file = if matches!(cli.command, Commands::Init { .. }) {
-            PathBuf::from("frump.md")
-        } else {
-            discover_task_file()?
-        };
-    }
-    let _write_lock = if cli.file.exists()
+    let cli = parse_cli();
+    let board = match &cli.command {
+        Commands::Init { .. } => resolve_board(
+            cli.board
+                .as_deref()
+                .unwrap_or_else(|| Path::new("frump.md")),
+        )?,
+        Commands::Import { to: Some(to), .. } => {
+            if cli.board.is_some() {
+                anyhow::bail!("Name the board with either --board or import --to, not both.");
+            }
+            resolve_board(to)?
+        }
+        _ => resolve_board(&match &cli.board {
+            Some(path) => path.clone(),
+            None => discover_task_file()?,
+        })?,
+    };
+    let _write_lock = if board.exists()
         && matches!(
             cli.command,
             Commands::Add { .. }
@@ -362,11 +449,11 @@ async fn main() -> Result<()> {
                 | Commands::Update { .. }
                 | Commands::Import { .. }
                 | Commands::Bulk { .. }
-                | Commands::ResolveConflicts { .. }
+                | Commands::RenumberDuplicates { .. }
                 | Commands::Migrate { .. }
                 | Commands::Next { .. }
         ) {
-        Some(acquire_write_lock(&cli.file)?)
+        Some(acquire_write_lock(&board)?)
     } else {
         None
     };
@@ -377,12 +464,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::Web { port } => {
-            frump::web::serve(cli.file.clone(), *port).await?;
+            frump::web::serve(board.clone(), *port).await?;
         }
 
         Commands::Commit { message } => {
-            commit_task_file(&cli.file, message)?;
-            println!("Committed {}", cli.file.display());
+            commit_task_file(&board, message)?;
+            println!("Committed {}", board.display());
         }
 
         Commands::List {
@@ -394,8 +481,35 @@ async fn main() -> Result<()> {
             sort,
             desc,
             format,
+            closed,
         } => {
-            let doc = read_document(&cli.file)?;
+            let doc = read_document(&board)?;
+
+            if *closed {
+                let history = BoardHistory::load(&board)?;
+                let mut removed = history.removed_tasks(&doc);
+                if let Some(tt) = task_type {
+                    let filter_type = TaskType::parse(tt);
+                    removed.retain(|t| t.task_type == filter_type);
+                }
+                if format == "json" {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &removed.into_iter().map(ListTask::from).collect::<Vec<_>>()
+                        )?
+                    );
+                } else if removed.is_empty() {
+                    println!("No closed tasks found.");
+                } else {
+                    println!("Closed tasks:\n");
+                    for task in &removed {
+                        println!("{} {} - {}", task.task_type, task.id, task.subject);
+                    }
+                    println!("\nTotal: {} closed tasks", removed.len());
+                }
+                return Ok(());
+            }
 
             let mut tasks = doc.tasks.tasks().to_vec();
 
@@ -450,37 +564,42 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Migrate { output } => {
-            let destination = output
-                .clone()
-                .unwrap_or_else(|| default_migration_destination(&cli.file));
-            storage::migrate_single_file(&cli.file, &destination)?;
+        Commands::Migrate { to } => {
+            let default_destination = default_migration_destination(&board);
+            let destination = match to {
+                Some(to) => resolve_board(to)?,
+                None => default_destination.clone(),
+            };
+            storage::migrate_single_file(&board, &destination)?;
             println!(
                 "Migrated {} to {}. The source file has been replaced.",
-                cli.file.display(),
+                board.display(),
                 destination.display()
             );
+            if destination != default_destination {
+                eprintln!(
+                    "Warning: {} is not {}, so it does not carry the Git history of {}. \
+                     Task numbers closed in {} can be given out again, and `frump history` \
+                     starts at this migration.",
+                    destination.display(),
+                    default_destination.display(),
+                    board.display(),
+                    board.display()
+                );
+            }
         }
 
-        Commands::Next { ids, clear } => {
-            let mut doc = read_document(&cli.file)?;
+        Commands::Next { set, clear } => {
+            let mut doc = read_document(&board)?;
             if *clear {
                 doc.next.clear();
-                storage::write(&cli.file, &doc)?;
+                storage::write(&board, &doc)?;
                 println!("Cleared next tasks.");
-            } else if ids.is_empty() {
-                if doc.next.is_empty() {
-                    println!("No next tasks planned.");
-                } else {
-                    for id in &doc.next {
-                        println!("{}", id);
-                    }
-                }
-            } else {
+            } else if let Some(ids) = set {
                 let next: Result<Vec<_>, _> = ids.iter().map(|id| TaskId::new(*id)).collect();
                 doc.next = next?;
                 doc.validate_next()?;
-                storage::write(&cli.file, &doc)?;
+                storage::write(&board, &doc)?;
                 println!(
                     "Set next tasks: {}",
                     doc.next
@@ -489,11 +608,17 @@ async fn main() -> Result<()> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
+            } else if doc.next.is_empty() {
+                println!("No next tasks planned.");
+            } else {
+                for id in &doc.next {
+                    println!("{}", id);
+                }
             }
         }
 
         Commands::Show { id } => {
-            let doc = read_document(&cli.file)?;
+            let doc = read_document(&board)?;
 
             let task_id = TaskId::new(*id)?;
             if let Some(task) = doc.tasks.find_by_id(task_id) {
@@ -514,15 +639,49 @@ async fn main() -> Result<()> {
         }
 
         Commands::Add {
-            task_type,
             subject,
+            task_type,
             body,
             assignee,
             status,
+            template,
+            fill,
         } => {
-            let mut doc = read_document(&cli.file)?;
+            let mut doc = read_document(&board)?;
+            let history = BoardHistory::load(&board)?;
+            let next_id = next_task_id(&doc, &history)?;
 
-            let query = normalize_search_text(subject);
+            let mut new_task = match template {
+                Some(name) => {
+                    let fills = parse_pairs(fill, "--fill")?;
+                    let template = TemplateManager::new(templates_file(&board)).get(name)?;
+                    let mut task = template.instantiate(next_id, &fills, body.as_deref())?;
+                    if let Some(task_type) = task_type {
+                        task.task_type = TaskType::parse(task_type);
+                    }
+                    task
+                }
+                None => {
+                    let subject = subject.clone().context("--subject is required")?;
+                    let mut task = Task::new(
+                        next_id,
+                        TaskType::parse(task_type.as_deref().unwrap_or("Task")),
+                        subject,
+                    );
+                    if let Some(b) = body {
+                        task.set_body(b.clone());
+                    }
+                    task
+                }
+            };
+            if new_task.subject.trim().is_empty() {
+                anyhow::bail!("Task subject cannot be empty.");
+            }
+            for property in &new_task.properties {
+                validate_property_value(&property.value)?;
+            }
+
+            let query = normalize_search_text(&new_task.subject);
             let candidates: Vec<_> = doc
                 .tasks
                 .tasks()
@@ -541,39 +700,14 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Find the next available task ID, considering git history
-            let next_id = if let Ok(repo) = FrumpRepo::open(".") {
-                if let Ok(Some(max_historical)) = repo.max_historical_id() {
-                    let current_max = doc.tasks.max_id();
-                    if let Some(current) = current_max {
-                        if max_historical > current {
-                            max_historical.next()
-                        } else {
-                            current.next()
-                        }
-                    } else {
-                        max_historical.next()
-                    }
-                } else {
-                    doc.tasks.next_id()
-                }
-            } else {
-                // Not in a git repo or can't open, use current max
-                doc.tasks.next_id()
-            };
-
-            let mut new_task = Task::new(next_id, TaskType::parse(task_type), subject.clone());
-
-            if let Some(b) = body {
-                new_task.set_body(b.clone());
-            }
-
             if let Some(a) = assignee {
                 validate_property_value(a)?;
                 new_task.set_assignee(a.clone());
-            } else if let Some(default) = doc.team.default_assignee() {
-                validate_property_value(&default.name)?;
-                new_task.set_assignee(default.name.clone());
+            } else if new_task.assignee().is_none() {
+                if let Some(default) = doc.team.default_assignee() {
+                    validate_property_value(&default.name)?;
+                    new_task.set_assignee(default.name.clone());
+                }
             }
 
             if let Some(s) = status {
@@ -585,44 +719,36 @@ async fn main() -> Result<()> {
 
             let assignment = new_task.assignee().map(str::to_string);
             let assignment_task = new_task.clone();
+            let added = format!(
+                "Added {} {} - {}",
+                new_task.task_type, next_id, new_task.subject
+            );
 
             doc.tasks.add(new_task);
 
             // Write back to file
-            storage::write(&cli.file, &doc)?;
+            storage::write(&board, &doc)?;
 
             if let Some(assignee) = assignment {
                 print_assignment_announcement(&assignment_task, &assignee);
             }
 
-            println!("Added {} {} - {}", task_type, next_id, subject);
+            println!("{added}");
         }
 
         Commands::Close { id } => {
-            let mut doc = read_document(&cli.file)?;
-
-            let task_id = TaskId::new(*id)?;
-            if doc.tasks.find_by_id(task_id).is_some() {
-                ensure_close_is_recoverable(&cli.file, task_id)?;
-                let dependency_errors = validate_dependencies(&doc);
-                if !dependency_errors.is_empty() {
-                    anyhow::bail!("Refusing to close: {}", dependency_errors.join("; "));
-                }
-                ensure_close_ready(&doc, task_id)?;
-                let task = doc.tasks.remove(task_id).expect("task checked above");
-                doc.remove_from_next(task_id);
-                storage::write(&cli.file, &doc)?;
-
-                println!("Closed {} {} - {}", task.task_type, task.id, task.subject);
-                println!("\nRemember to commit this change with a descriptive message.");
-            } else {
-                anyhow::bail!("Task {} not found.", id);
-            }
+            let mut doc = read_document(&board)?;
+            let history = BoardHistory::load(&board)?;
+            let results = prepare_close(&doc, &history, &[TaskId::new(*id)?])?;
+            apply_close(&mut doc, &results);
+            storage::write(&board, &doc)?;
+            report_close(&results);
+            print_line("\nRemember to commit this change with a descriptive message.");
         }
 
         Commands::Assign { id, assignee } => {
             validate_property_value(assignee)?;
-            let mut doc = read_document(&cli.file)?;
+            let mut doc = read_document(&board)?;
 
             let task_id = TaskId::new(*id)?;
             if let Some(task) = doc.tasks.find_by_id_mut(task_id) {
@@ -631,7 +757,7 @@ async fn main() -> Result<()> {
                 touch_task(task);
                 let assigned_task = changed.then(|| task.clone());
 
-                storage::write(&cli.file, &doc)?;
+                storage::write(&board, &doc)?;
 
                 if let Some(task) = assigned_task {
                     print_assignment_announcement(&task, assignee);
@@ -648,7 +774,7 @@ async fn main() -> Result<()> {
             property,
             value,
         } => {
-            let mut doc = read_document(&cli.file)?;
+            let mut doc = read_document(&board)?;
 
             let task_id = TaskId::new(*id)?;
             let prop_key = PropertyKey::new(property)?;
@@ -682,7 +808,7 @@ async fn main() -> Result<()> {
             if completed {
                 doc.remove_from_next(task_id);
             }
-            storage::write(&cli.file, &doc)?;
+            storage::write(&board, &doc)?;
             if let Some(task) = assigned_task {
                 print_assignment_announcement(&task, value);
             }
@@ -690,7 +816,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Unset { id, property } => {
-            let mut doc = read_document(&cli.file)?;
+            let mut doc = read_document(&board)?;
             let key = PropertyKey::new(property)?;
             if property == LAST_UPDATED_PROPERTY {
                 anyhow::bail!(
@@ -711,18 +837,17 @@ async fn main() -> Result<()> {
             }
             task.remove_property(&key);
             touch_task(task);
-            storage::write(&cli.file, &doc)?;
+            storage::write(&board, &doc)?;
             println!("Removed {} from task {}", property, id);
         }
 
         Commands::History { id } => {
-            let repo = FrumpRepo::open(".").map_err(|_| {
-                anyhow::anyhow!(
-                    "Task history requires a Git repository containing tracked frump.md history."
-                )
-            })?;
+            let history = BoardHistory::load(&board)?;
+            if !history.in_git() {
+                anyhow::bail!("Task history requires a board inside a Git repository.");
+            }
             let task_id = TaskId::new(*id)?;
-            let history = repo.task_history(task_id)?;
+            let history = history.task_history(task_id);
 
             if history.commits.is_empty() {
                 println!("No history found for task {}", id);
@@ -752,40 +877,14 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Closed => {
-            let repo = FrumpRepo::open(".").context("Not in a git repository")?;
-            let deleted = repo.deleted_tasks()?;
-
-            if deleted.is_empty() {
-                println!("No closed tasks found.");
-            } else {
-                println!("Closed tasks:\n");
-                for (id, task_type, subject) in &deleted {
-                    println!("{} {} - {}", task_type, id, subject);
-                }
-                println!("\nTotal: {} closed tasks", deleted.len());
-            }
-        }
-
         Commands::Update {
             id,
             subject,
             body,
             clear_body,
-            append_body,
-            append_body_notify,
-            append_body_msg,
+            append,
+            notify,
         } => {
-            if subject.is_none()
-                && body.is_none()
-                && !clear_body
-                && append_body.is_none()
-                && append_body_notify.is_none()
-                && append_body_msg.is_none()
-            {
-                println!("Error: provide --subject, --body, --clear-body, or an append option");
-                return Ok(());
-            }
             if body
                 .as_ref()
                 .is_some_and(|new_body| new_body.trim().is_empty())
@@ -793,57 +892,59 @@ async fn main() -> Result<()> {
                 anyhow::bail!("Body cannot be empty; use --clear-body to remove it explicitly.");
             }
 
-            let mut doc = read_document(&cli.file)?;
+            let mut doc = read_document(&board)?;
 
             let task_id = TaskId::new(*id)?;
-            if let Some(task) = doc.tasks.find_by_id_mut(task_id) {
-                if let Some(new_subject) = subject {
-                    task.subject = new_subject.clone();
-                    println!("Updated subject for task {}", id);
-                }
-                if let Some(new_body) = body {
-                    task.set_body(new_body.clone());
-                    println!("Replaced body for task {}", id);
-                }
-                if *clear_body {
-                    task.set_body(String::new());
-                    println!("Cleared body for task {}", id);
-                }
-                if let Some(extra) = append_body {
-                    append_update(task, extra, current_crew_agent().as_deref())?;
-                    println!("Appended body for task {}", id);
-                } else if let Some(extra) = append_body_notify {
-                    append_update(task, extra, current_crew_agent().as_deref())?;
-                    println!("Appended body for task {}", id);
-                } else if let Some(extra) = append_body_msg {
-                    append_update(task, extra, current_crew_agent().as_deref())?;
-                    println!("Appended body for task {}", id);
-                } else {
-                    touch_task(task);
-                }
+            let task = doc
+                .tasks
+                .find_by_id_mut(task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task {} not found.", id))?;
+            // Report each change only after the whole update is saved.
+            let mut changes = Vec::new();
+            if let Some(new_subject) = subject {
+                task.subject = new_subject.clone();
+                changes.push("Updated subject");
+            }
+            if let Some(new_body) = body {
+                task.set_body(new_body.clone());
+                changes.push("Replaced body");
+            }
+            if *clear_body {
+                task.set_body(String::new());
+                changes.push("Cleared body");
+            }
+            if let Some(extra) = append {
+                append_update(task, extra, current_crew_agent().as_deref())?;
+                changes.push("Appended body");
+            } else {
+                touch_task(task);
+            }
 
-                storage::write(&cli.file, &doc)?;
-                if let Some(message) = append_body_notify {
-                    let task = doc
-                        .tasks
-                        .find_by_id(task_id)
-                        .expect("task exists after update");
-                    report_notification(notify_task_update(task, message));
-                } else if let Some(message) = append_body_msg {
-                    report_notification(send_metateam_message(
+            storage::write(&board, &doc)?;
+            for change in changes {
+                println!("{change} for task {id}");
+            }
+            if let (Some(message), Some(target)) = (append, notify) {
+                match target {
+                    NotifyTarget::Assignee => {
+                        let task = doc
+                            .tasks
+                            .find_by_id(task_id)
+                            .expect("task exists after update");
+                        report_notification(notify_task_update(task, message));
+                    }
+                    NotifyTarget::All => report_notification(send_metateam_message(
                         &["crew", "message", "all", message],
                         "send message",
-                    ));
+                    )),
                 }
-            } else {
-                anyhow::bail!("Task {} not found.", id);
             }
         }
 
-        Commands::Search { query, full } => {
-            let doc = read_document(&cli.file)?;
+        Commands::Search { text, show_body } => {
+            let doc = read_document(&board)?;
 
-            let normalized_query = normalize_search_text(query);
+            let normalized_query = normalize_search_text(text);
             let mut found = Vec::new();
 
             for task in doc.tasks.tasks() {
@@ -866,12 +967,12 @@ async fn main() -> Result<()> {
             });
 
             if found.is_empty() {
-                println!("No tasks found matching '{}'", query);
+                println!("No tasks found matching '{}'", text);
             } else {
                 println!(
                     "Found {} similar task(s) matching '{}':\n",
                     found.len(),
-                    query
+                    text
                 );
                 for (task, score, subject_match) in found {
                     println!("{} {} - {}", task.task_type, task.id, task.subject);
@@ -880,22 +981,15 @@ async fn main() -> Result<()> {
                         score * 100.0,
                         if subject_match { "subject" } else { "body" }
                     );
-                    if *full && !task.body.is_empty() {
-                        // Show a snippet of the body
-                        let snippet = task.body.lines().take(2).collect::<Vec<_>>().join(" ");
-                        let truncated = if snippet.len() > 80 {
-                            format!("{}...", &snippet[..80])
-                        } else {
-                            snippet
-                        };
-                        println!("  {}", truncated);
+                    if *show_body && !task.body.is_empty() {
+                        println!("  {}", body_snippet(&task.body));
                     }
                 }
             }
         }
 
         Commands::Stats => {
-            let doc = read_document(&cli.file)?;
+            let doc = read_document(&board)?;
 
             let total = doc.tasks.len();
 
@@ -961,107 +1055,115 @@ async fn main() -> Result<()> {
                 println!("  (no assignee): {}", no_assignee);
             }
 
-            // Optional: show closed tasks count if in git repo
-            if let Ok(repo) = FrumpRepo::open(".") {
-                if let Ok(deleted) = repo.deleted_tasks() {
-                    println!("\nClosed tasks: {}", deleted.len());
-                }
+            let history = BoardHistory::load(&board)?;
+            if history.in_git() {
+                println!("\nClosed tasks: {}", history.removed_tasks(&doc).len());
             }
         }
 
         Commands::Validate => {
-            match read_document(&cli.file) {
-                Ok(doc) => {
-                    println!("✓ File structure is valid");
-
-                    // Check for duplicate IDs
-                    let mut ids = std::collections::HashSet::new();
-                    let mut duplicates = Vec::new();
-                    for task in doc.tasks.tasks() {
-                        if !ids.insert(task.id) {
-                            duplicates.push(task.id);
-                        }
-                    }
-
-                    if !duplicates.is_empty() {
-                        println!("✗ Found duplicate task IDs: {:?}", duplicates);
-                    } else {
-                        println!("✓ All task IDs are unique");
-                    }
-
-                    let dependency_errors = validate_dependencies(&doc);
-                    if dependency_errors.is_empty() {
-                        println!("✓ Dependencies resolve and are acyclic");
-                    } else {
-                        for error in dependency_errors {
-                            println!("✗ {}", error);
-                        }
-                        anyhow::bail!("Dependency validation failed");
-                    }
-
-                    // Check for sequential IDs
-                    let mut ids_vec: Vec<_> =
-                        doc.tasks.tasks().iter().map(|t| t.id.value()).collect();
-                    ids_vec.sort();
-                    let mut gaps = Vec::new();
-                    for i in 1..ids_vec.len() {
-                        if ids_vec[i] > ids_vec[i - 1] + 1 {
-                            gaps.push((ids_vec[i - 1] + 1, ids_vec[i] - 1));
-                        }
-                    }
-
-                    if !gaps.is_empty() {
-                        println!("⚠ ID gaps found (possibly closed tasks):");
-                        for (start, end) in gaps {
-                            if start == end {
-                                println!("  ID {}", start);
-                            } else {
-                                println!("  IDs {}-{}", start, end);
-                            }
-                        }
-                    } else {
-                        println!("✓ Task IDs are sequential");
-                    }
-
-                    // Validate team emails
-                    // Email is already validated by the Email type during parsing
-
-                    println!(
-                        "\n✓ Validation complete: {} tasks, {} team members",
-                        doc.tasks.len(),
-                        doc.team.len()
-                    );
-                }
+            let doc = match read_document(&board) {
+                Ok(doc) => doc,
                 Err(e) => {
-                    println!("✗ Validation failed: {}", e);
+                    println!("✗ Validation failed: {:#}", e);
+                    anyhow::bail!("Validation failed");
+                }
+            };
+            println!("✓ File structure is valid");
+            let mut failed = false;
+
+            // Check for duplicate IDs
+            let mut ids = std::collections::HashSet::new();
+            let mut duplicates = Vec::new();
+            for task in doc.tasks.tasks() {
+                if !ids.insert(task.id) {
+                    duplicates.push(task.id);
                 }
             }
+
+            if !duplicates.is_empty() {
+                println!("✗ Found duplicate task IDs: {:?}", duplicates);
+                println!("  Run 'frump renumber-duplicates' to give them new numbers.");
+                failed = true;
+            } else {
+                println!("✓ All task IDs are unique");
+            }
+
+            let history = BoardHistory::load(&board)?;
+            let dependency_errors = validate_dependencies(&doc, &history);
+            if dependency_errors.is_empty() {
+                println!("✓ Dependencies resolve and are acyclic");
+            } else {
+                for error in dependency_errors {
+                    println!("✗ {}", error);
+                }
+                failed = true;
+            }
+
+            // Check for sequential IDs
+            let mut ids_vec: Vec<_> = doc.tasks.tasks().iter().map(|t| t.id.value()).collect();
+            ids_vec.sort();
+            let mut gaps = Vec::new();
+            for i in 1..ids_vec.len() {
+                if ids_vec[i] > ids_vec[i - 1] + 1 {
+                    gaps.push((ids_vec[i - 1] + 1, ids_vec[i] - 1));
+                }
+            }
+
+            if !gaps.is_empty() {
+                println!("⚠ ID gaps found (possibly closed tasks):");
+                for (start, end) in gaps {
+                    if start == end {
+                        println!("  ID {}", start);
+                    } else {
+                        println!("  IDs {}-{}", start, end);
+                    }
+                }
+            } else {
+                println!("✓ Task IDs are sequential");
+            }
+
+            if failed {
+                anyhow::bail!("Validation failed");
+            }
+            println!(
+                "\n✓ Validation complete: {} tasks, {} team members",
+                doc.tasks.len(),
+                doc.team.len()
+            );
         }
 
         Commands::Init { title } => {
-            if cli.file.exists() {
+            if board.exists() {
                 anyhow::bail!(
                     "{} already exists; refusing to overwrite it.",
-                    cli.file.display()
+                    board.display()
                 );
             }
-            fs::write(&cli.file, format!("# {}\n\n## Team\n\n## Tasks\n", title))
-                .with_context(|| format!("Failed to initialize {}", cli.file.display()))?;
-            println!("Initialized {}", cli.file.display());
+            fs::write(&board, format!("# {}\n\n## Team\n\n## Tasks\n", title))
+                .with_context(|| format!("Failed to initialize {}", board.display()))?;
+            println!("Initialized {}", board.display());
         }
 
-        Commands::Deps { id } => {
-            let doc = read_document(&cli.file)?;
-            print_dependency_tree(
+        Commands::DependsOn { id } => {
+            let doc = read_document(&board)?;
+            let history = BoardHistory::load(&board)?;
+            let task_id = TaskId::new(*id)?;
+            let task = doc
+                .tasks
+                .find_by_id(task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task {} not found.", id))?;
+            print_prerequisite_tree(
                 &doc,
-                TaskId::new(*id)?,
+                &history,
+                task,
                 0,
                 &mut std::collections::HashSet::new(),
-            )?;
+            );
         }
 
         Commands::Dependents { id } => {
-            let doc = read_document(&cli.file)?;
+            let doc = read_document(&board)?;
             let id = TaskId::new(*id)?;
             for task in doc
                 .tasks
@@ -1074,97 +1176,99 @@ async fn main() -> Result<()> {
         }
 
         Commands::Ready => {
-            let doc = read_document(&cli.file)?;
-            for task in doc.tasks.tasks().iter().filter(|task| {
-                task.status() != Some("done")
-                    && dependency_ids(task).iter().all(|dependency| {
-                        doc.tasks
-                            .find_by_id(*dependency)
-                            .map(|prerequisite| prerequisite.status() == Some("done"))
-                            .unwrap_or(true)
-                    })
-            }) {
+            let doc = read_document(&board)?;
+            let history = BoardHistory::load(&board)?;
+            for task in doc
+                .tasks
+                .tasks()
+                .iter()
+                .filter(|task| task.status() != Some("done") && is_ready(task, &doc, &history))
+            {
                 println!("{} {} - {}", task.task_type, task.id, task.subject);
             }
         }
 
-        Commands::Export { format, output } => {
-            let doc = read_document(&cli.file)?;
+        Commands::Export { format, to } => {
+            let doc = read_document(&board)?;
 
-            let exported = match format.to_lowercase().as_str() {
+            let exported = match format.as_str() {
                 "json" => export_json(&doc)?,
-                "csv" => export_csv(&doc)?,
-                _ => {
-                    println!(
-                        "Error: Unknown format '{}'. Supported formats: json, csv",
-                        format
-                    );
-                    return Ok(());
-                }
+                _ => export_csv(&doc)?,
             };
 
-            if let Some(output_path) = output {
-                fs::write(output_path, &exported).context("Failed to write output file")?;
-                println!("Exported {} tasks to {:?}", doc.tasks.len(), output_path);
+            if let Some(output_path) = to {
+                ensure_outside_board(&board, output_path, "export --to")?;
+                fs::write(output_path, &exported)
+                    .with_context(|| format!("Failed to write {}", output_path.display()))?;
+                println!(
+                    "Exported {} tasks to {}",
+                    doc.tasks.len(),
+                    output_path.display()
+                );
             } else {
                 println!("{}", exported);
             }
         }
 
-        Commands::Import { file, merge } => {
-            let import_content = fs::read_to_string(file).context("Failed to read import file")?;
+        Commands::Import { from, merge, .. } => {
+            ensure_outside_board(&board, from, "import --from")?;
+            let import_content = fs::read_to_string(from)
+                .with_context(|| format!("Failed to read {}", from.display()))?;
 
             let imported_doc = import_json(&import_content)?;
 
             if *merge {
-                // Merge: add imported tasks to existing document
-                let mut current_doc = read_document(&cli.file)?;
+                let mut current_doc = read_document(&board)?;
+                let history = BoardHistory::load(&board)?;
+                let new_ids = allocate_task_ids(&current_doc, &history, imported_doc.tasks.len())?;
+                let mut renumber = HashMap::new();
+                for (task, new_id) in imported_doc.tasks.tasks().iter().zip(&new_ids) {
+                    if renumber.insert(task.id, *new_id).is_some() {
+                        anyhow::bail!(
+                            "{} has task {} more than once; nothing was imported.",
+                            from.display(),
+                            task.id
+                        );
+                    }
+                }
 
-                // Find next available ID
-                let first_id = current_doc
-                    .tasks
-                    .max_id()
-                    .map(|id| id.value() + 1)
-                    .unwrap_or(1);
-
-                // Add imported tasks with new IDs
-                let mut added = 0;
                 let mut announcements = Vec::new();
-                for (offset, task) in imported_doc.tasks.tasks().iter().enumerate() {
-                    let new_id = TaskId::new(first_id + offset as u32)?;
+                let mut added = Vec::new();
+                for (task, new_id) in imported_doc.tasks.tasks().iter().zip(&new_ids) {
                     let mut new_task =
-                        Task::new(new_id, task.task_type.clone(), task.subject.clone());
+                        Task::new(*new_id, task.task_type.clone(), task.subject.clone());
                     new_task.set_body(task.body.clone());
 
                     for prop in &task.properties {
-                        validate_property_value(&prop.value)?;
-                        new_task.add_property(prop.key.clone(), prop.value.clone());
+                        let value = if prop.key.as_str() == "Depends On" {
+                            renumber_dependencies(&prop.value, &renumber, task.id, from)?
+                        } else {
+                            prop.value.clone()
+                        };
+                        validate_property_value(&value)?;
+                        new_task.add_property(prop.key.clone(), value);
                     }
                     touch_task(&mut new_task);
 
                     if let Some(assignee) = new_task.assignee().map(str::to_string) {
                         announcements.push((new_task.clone(), assignee));
                     }
-
-                    current_doc.tasks.add(new_task);
-                    added += 1;
+                    added.push(new_task);
+                }
+                let count = added.len();
+                for task in added {
+                    current_doc.tasks.add(task);
                 }
 
-                storage::write(&cli.file, &current_doc)?;
+                storage::write(&board, &current_doc)?;
                 for (task, assignee) in announcements {
                     print_assignment_announcement(&task, &assignee);
                 }
 
-                println!("Merged {} tasks into frump.md", added);
+                println!("Merged {} tasks into {}", count, board.display());
             } else {
-                // Replace: overwrite with imported document
-                storage::write(&cli.file, &imported_doc)?;
-                for task in imported_doc.tasks.tasks() {
-                    if let Some(assignee) = task.assignee() {
-                        print_assignment_announcement(task, assignee);
-                    }
-                }
-
+                // Replace: a restore of a whole board; it assigns nobody, so it announces nothing.
+                storage::write(&board, &imported_doc)?;
                 println!(
                     "Imported {} tasks, {} team members",
                     imported_doc.tasks.len(),
@@ -1174,7 +1278,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Template { action } => {
-            let manager = TemplateManager::new();
+            let manager = TemplateManager::new(templates_file(&board));
 
             match action {
                 TemplateAction::Add {
@@ -1182,13 +1286,14 @@ async fn main() -> Result<()> {
                     task_type,
                     subject,
                     body,
+                    property,
                 } => {
                     let template = TaskTemplate {
                         name: name.clone(),
                         task_type: task_type.clone(),
                         subject_template: subject.clone(),
                         body_template: body.clone().unwrap_or_default(),
-                        properties: std::collections::HashMap::new(),
+                        properties: parse_pairs(property, "--property")?,
                     };
 
                     manager.add(template)?;
@@ -1237,40 +1342,41 @@ async fn main() -> Result<()> {
         }
 
         Commands::Bulk { action } => {
-            let mut doc = read_document(&cli.file)?;
+            let mut doc = read_document(&board)?;
 
             match action {
-                BulkAction::CloseByStatus { status } => {
-                    let tasks_to_close: Vec<TaskId> = doc
+                BulkAction::Close { with_status } => {
+                    let ids: Vec<TaskId> = doc
                         .tasks
                         .tasks()
                         .iter()
-                        .filter(|t| t.status().map(|s| s == status).unwrap_or(false))
+                        .filter(|t| t.status() == Some(with_status.as_str()))
                         .map(|t| t.id)
                         .collect();
 
-                    if tasks_to_close.is_empty() {
-                        println!("No tasks found with status '{}'", status);
+                    if ids.is_empty() {
+                        println!("No tasks found with status '{}'", with_status);
                         return Ok(());
                     }
 
-                    let count = tasks_to_close.len();
-                    for id in tasks_to_close {
-                        doc.tasks.remove(id);
-                        doc.remove_from_next(id);
-                    }
-
-                    storage::write(&cli.file, &doc)?;
-
-                    println!("Closed {} task(s) with status '{}'", count, status);
+                    let history = BoardHistory::load(&board)?;
+                    let results = prepare_close(&doc, &history, &ids)?;
+                    apply_close(&mut doc, &results);
+                    storage::write(&board, &doc)?;
+                    report_close(&results);
+                    print_line(&format!(
+                        "\nClosed {} task(s) with status '{}'",
+                        results.len(),
+                        with_status
+                    ));
                 }
 
-                BulkAction::AssignByType {
-                    task_type,
+                BulkAction::Assign {
+                    with_type,
                     assignee,
                 } => {
                     validate_property_value(assignee)?;
-                    let filter_type = TaskType::parse(task_type);
+                    let filter_type = TaskType::parse(with_type);
                     let mut count = 0;
                     let mut announcements = Vec::new();
 
@@ -1287,23 +1393,23 @@ async fn main() -> Result<()> {
                     }
 
                     if count == 0 {
-                        println!("No tasks found with type '{}'", task_type);
+                        println!("No tasks found with type '{}'", with_type);
                         return Ok(());
                     }
 
-                    storage::write(&cli.file, &doc)?;
+                    storage::write(&board, &doc)?;
                     for task in announcements {
                         print_assignment_announcement(&task, assignee);
                     }
 
                     println!(
                         "Assigned {} task(s) of type '{}' to {}",
-                        count, task_type, assignee
+                        count, with_type, assignee
                     );
                 }
 
-                BulkAction::SetByStatus {
-                    status,
+                BulkAction::Set {
+                    with_status,
                     property,
                     value,
                 } => {
@@ -1319,7 +1425,7 @@ async fn main() -> Result<()> {
                         .tasks
                         .tasks()
                         .iter()
-                        .filter(|task| task.status() == Some(status.as_str()))
+                        .filter(|task| task.status() == Some(with_status.as_str()))
                         .map(|task| task.id)
                         .collect();
                     if property == "Status" {
@@ -1331,7 +1437,7 @@ async fn main() -> Result<()> {
                     let mut announcements = Vec::new();
 
                     for task in doc.tasks.tasks_mut() {
-                        if task.status().map(|s| s == status).unwrap_or(false) {
+                        if task.status() == Some(with_status.as_str()) {
                             let assignment_changed = property == "Assigned To"
                                 && task.assignee() != Some(value.as_str());
                             task.set_property(prop_key.clone(), value.clone());
@@ -1350,67 +1456,35 @@ async fn main() -> Result<()> {
                     }
 
                     if count == 0 {
-                        println!("No tasks found with status '{}'", status);
+                        println!("No tasks found with status '{}'", with_status);
                         return Ok(());
                     }
 
-                    storage::write(&cli.file, &doc)?;
+                    storage::write(&board, &doc)?;
                     for task in announcements {
                         print_assignment_announcement(&task, value);
                     }
 
                     println!(
                         "Set {} = {} on {} task(s) with status '{}'",
-                        property, value, count, status
+                        property, value, count, with_status
                     );
                 }
             }
         }
 
-        Commands::CheckConflicts => {
-            let doc = read_document(&cli.file)?;
+        Commands::RenumberDuplicates { commit } => {
+            let mut doc = read_document(&board)?;
 
-            // Find duplicate IDs
-            let mut id_occurrences: std::collections::HashMap<TaskId, Vec<&Task>> =
-                std::collections::HashMap::new();
-            for task in doc.tasks.tasks() {
-                id_occurrences.entry(task.id).or_default().push(task);
-            }
-
-            let duplicates: Vec<_> = id_occurrences
+            // Find duplicate IDs; the first occurrence keeps its number.
+            let mut seen = std::collections::HashSet::new();
+            let duplicates: Vec<usize> = doc
+                .tasks
+                .tasks()
                 .iter()
-                .filter(|(_, tasks)| tasks.len() > 1)
-                .collect();
-
-            if duplicates.is_empty() {
-                println!("✓ No duplicate task IDs found");
-                println!("✓ File is ready for merge");
-            } else {
-                println!("✗ Found {} duplicate task ID(s):\n", duplicates.len());
-                for (id, tasks) in duplicates {
-                    println!("ID {}:", id);
-                    for task in tasks {
-                        println!("  - {} {}: {}", task.task_type, id, task.subject);
-                    }
-                    println!();
-                }
-                println!("Run 'frump resolve-conflicts' to automatically renumber conflicts");
-            }
-        }
-
-        Commands::ResolveConflicts { commit } => {
-            let mut doc = read_document(&cli.file)?;
-
-            // Find duplicate IDs
-            let mut id_occurrences: std::collections::HashMap<TaskId, Vec<usize>> =
-                std::collections::HashMap::new();
-            for (idx, task) in doc.tasks.tasks().iter().enumerate() {
-                id_occurrences.entry(task.id).or_default().push(idx);
-            }
-
-            let duplicates: Vec<_> = id_occurrences
-                .iter()
-                .filter(|(_, indices)| indices.len() > 1)
+                .enumerate()
+                .filter(|(_, task)| !seen.insert(task.id))
+                .map(|(index, _)| index)
                 .collect();
 
             if duplicates.is_empty() {
@@ -1419,29 +1493,18 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            // Find the maximum ID in the document
-            let max_id = doc
-                .tasks
-                .max_id()
-                .ok_or_else(|| anyhow::anyhow!("No tasks found"))?;
-            let mut next_id = max_id.next();
-
-            // Renumber conflicting tasks (keep first occurrence, renumber the rest)
+            let history = BoardHistory::load(&board)?;
+            let new_ids = allocate_task_ids(&doc, &history, duplicates.len())?;
             let mut renumbered = Vec::new();
-            for (_dup_id, indices) in duplicates {
-                // Skip the first occurrence (keep original ID)
-                for &idx in indices.iter().skip(1) {
-                    let task = &mut doc.tasks.tasks_mut()[idx];
-                    let old_id = task.id;
-                    task.id = next_id;
-                    touch_task(task);
-                    renumbered.push((old_id, next_id, task.subject.clone()));
-                    next_id = next_id.next();
-                }
+            for (&index, &new_id) in duplicates.iter().zip(&new_ids) {
+                let task = &mut doc.tasks.tasks_mut()[index];
+                let old_id = task.id;
+                task.id = new_id;
+                touch_task(task);
+                renumbered.push((old_id, new_id, task.subject.clone()));
             }
 
-            // Write back to file
-            storage::write(&cli.file, &doc)?;
+            storage::write(&board, &doc)?;
 
             println!("✓ Resolved {} duplicate task ID(s):\n", renumbered.len());
             for (old_id, new_id, subject) in &renumbered {
@@ -1449,39 +1512,17 @@ async fn main() -> Result<()> {
             }
 
             if *commit {
-                // Create a git commit
-                let commit_message = format!(
-                    "Resolve task ID conflicts\n\nRenumbered {} conflicting task(s)",
-                    renumbered.len()
-                );
-
-                // Stage the frump.md file
-                let status = std::process::Command::new("git")
-                    .arg("add")
-                    .arg(&cli.file)
-                    .status()
-                    .context("Failed to stage file with git")?;
-
-                if !status.success() {
-                    println!("\n✗ Failed to stage changes");
-                    return Ok(());
-                }
-
-                // Create commit
-                let status = std::process::Command::new("git")
-                    .args(["commit", "-m", &commit_message])
-                    .status()
-                    .context("Failed to create git commit")?;
-
-                if status.success() {
-                    println!("\n✓ Changes committed automatically");
-                } else {
-                    println!("\n⚠ Changes saved but commit failed");
-                    println!("You may need to commit manually");
-                }
+                commit_task_file(
+                    &board,
+                    &format!(
+                        "Resolve task ID conflicts\n\nRenumbered {} conflicting task(s)",
+                        renumbered.len()
+                    ),
+                )?;
+                println!("\n✓ Changes committed");
             } else {
                 println!("\nRemember to commit these changes.");
-                println!("Run with --commit flag to commit automatically.");
+                println!("Run with --commit to commit automatically.");
             }
         }
     }
@@ -1489,48 +1530,52 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn ensure_close_is_recoverable(file: &Path, task_id: TaskId) -> Result<()> {
-    let tracked_file = if storage::is_sharded(file) {
-        file.join("tasks").join(format!("{}.md", task_id.value()))
-    } else {
-        file.to_path_buf()
-    };
-    let root_output = std::process::Command::new("git")
-        .current_dir(tracked_file.parent().unwrap_or_else(|| Path::new(".")))
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .context("Failed to locate the Git repository for task closure")?;
-    if !root_output.status.success() {
-        anyhow::bail!(
-            "Refusing to close a task: {} is not in a Git repository.",
-            tracked_file.display()
-        );
-    }
-    let root = PathBuf::from(String::from_utf8_lossy(&root_output.stdout).trim());
-    let absolute_file = tracked_file
-        .canonicalize()
-        .with_context(|| format!("Failed to resolve {}", tracked_file.display()))?;
-    let repository_path = absolute_file.strip_prefix(&root).map_err(|_| {
-        anyhow::anyhow!(
-            "Refusing to close a task: {} is outside the current Git repository.",
-            tracked_file.display()
-        )
-    })?;
-    let status = std::process::Command::new("git")
-        .current_dir(&root)
-        .args(["ls-files", "--error-unmatch", "--"])
-        .arg(repository_path)
-        .stderr(std::process::Stdio::null())
-        .status()
-        .context("Failed to verify whether the task file is tracked by Git")?;
+/// Rewrite one imported `Depends On` value to the new task numbers. An entry that is not a task
+/// number stays as written; a number outside the imported file refuses the whole import.
+fn renumber_dependencies(
+    value: &str,
+    renumber: &HashMap<TaskId, TaskId>,
+    task: TaskId,
+    source: &Path,
+) -> Result<String> {
+    value
+        .split(',')
+        .map(|raw| {
+            let raw = raw.trim();
+            match raw.parse::<u32>().ok().and_then(|id| TaskId::new(id).ok()) {
+                None => Ok(raw.to_string()),
+                Some(id) => renumber.get(&id).map(ToString::to_string).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Task {} in {} depends on task {}, which the file does not have; nothing was imported.",
+                        task,
+                        source.display(),
+                        id
+                    )
+                }),
+            }
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|entries| entries.join(", "))
+}
 
-    if !status.success() {
-        anyhow::bail!(
-            "Refusing to close a task: {} is not tracked by Git, so its closure cannot be recovered from history.",
-            tracked_file.display()
-        );
+/// Report closed tasks after the board is saved. Every recovery warning goes to stderr first:
+/// it may hold the only copy of a task, and a closed stdout must not stop it.
+fn report_close(results: &[CloseResult]) {
+    for warning in results.iter().filter_map(|result| result.warning.as_ref()) {
+        eprintln!("Warning: {warning}");
     }
-    Ok(())
+    for result in results {
+        print_line(&format!(
+            "Closed {} {} - {}",
+            result.task.task_type, result.task.id, result.task.subject
+        ));
+    }
+}
+
+/// Print one informational line after a saved change; a reader that closed stdout is ignored.
+fn print_line(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout(), "{text}");
 }
 
 fn discover_task_file() -> Result<PathBuf> {
@@ -1552,39 +1597,59 @@ fn discover_task_file() -> Result<PathBuf> {
             return Ok(sharded);
         }
         let Some(parent) = directory.parent() else {
-            anyhow::bail!("No frump.md found from the current directory through the filesystem root. Pass --file explicitly or run frump init.");
+            anyhow::bail!("No frump.md found from the current directory through the filesystem root. Pass --board explicitly or run frump init.");
         };
         if parent == directory {
-            anyhow::bail!("No frump.md found from the current directory through the filesystem root. Pass --file explicitly or run frump init.");
+            anyhow::bail!("No frump.md found from the current directory through the filesystem root. Pass --board explicitly or run frump init.");
         }
         directory = parent.to_path_buf();
     }
 }
 
+/// Stage and commit exactly the board's files. A directory board is committed from inside
+/// itself (`general.md` and `tasks`), so it works at the repository root too; the sibling
+/// `<dir>.md` that `migrate` replaced is included while Git still tracks it.
 fn commit_task_file(file: &Path, message: &str) -> Result<()> {
     let (directory, paths): (PathBuf, Vec<String>) = if let Some(root) = storage::sharded_root(file)
     {
-        let parent = root
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let name = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Sharded board path has no directory name"))?;
-        let legacy_source = format!("{name}.md");
-        let tracked_legacy_source = std::process::Command::new("git")
-            .current_dir(&parent)
-            .args(["ls-files", "--error-unmatch", "--", &legacy_source])
-            .output()
-            .context("Failed to inspect the legacy board path")?
-            .status
-            .success();
-        let mut paths = vec![name.to_string()];
-        if tracked_legacy_source {
-            paths.push(legacy_source);
+        let mut paths = vec!["general.md".to_string()];
+        // Git refuses a pathspec that matches nothing, and a new board has an empty `tasks/`.
+        // `tasks` is committed when a task file is on disk, in the index or in HEAD, so the
+        // deletion of the last task still commits.
+        let has_task_files = fs::read_dir(root.join("tasks"))
+            .with_context(|| format!("Failed to read {}", root.join("tasks").display()))?
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "md"));
+        let git_lists = |args: &[&str]| -> Result<bool> {
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .stderr(std::process::Stdio::null())
+                .output()
+                .context("Failed to inspect the tasks directory")?;
+            Ok(output.status.success() && !output.stdout.is_empty())
+        };
+        if has_task_files
+            || git_lists(&["ls-files", "--", "tasks"])?
+            || git_lists(&["ls-tree", "-r", "--name-only", "HEAD", "--", "tasks"])?
+        {
+            paths.push("tasks".to_string());
         }
-        (parent, paths)
+        if let Some(name) = root.file_name().and_then(|name| name.to_str()) {
+            let legacy_source = format!("../{name}.md");
+            let tracked_legacy_source = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["ls-files", "--error-unmatch", "--", &legacy_source])
+                .stderr(std::process::Stdio::null())
+                .output()
+                .context("Failed to inspect the legacy board path")?
+                .status
+                .success();
+            if tracked_legacy_source {
+                paths.push(legacy_source);
+            }
+        }
+        (root, paths)
     } else {
         let parent = file.parent().unwrap_or_else(|| Path::new("."));
         let name = file
@@ -1626,28 +1691,6 @@ fn report_notification(result: Result<Option<String>>) {
     }
 }
 
-fn ensure_close_ready(doc: &frump::FrumpDoc, id: TaskId) -> Result<()> {
-    let task = doc
-        .tasks
-        .find_by_id(id)
-        .ok_or_else(|| anyhow::anyhow!("Task {} not found.", id))?;
-    if task.status() != Some("done") {
-        anyhow::bail!("Refusing to close task {}: Status must be done.", id);
-    }
-    for dependency in dependency_ids(task) {
-        if let Some(prerequisite) = doc.tasks.find_by_id(dependency) {
-            if prerequisite.status() != Some("done") {
-                anyhow::bail!(
-                    "Refusing to close task {}: dependency {} is not done.",
-                    id,
-                    dependency
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 fn normalize_search_text(value: &str) -> String {
     value
         .chars()
@@ -1660,6 +1703,16 @@ fn normalize_search_text(value: &str) -> String {
         })
         .collect::<String>()
         .to_lowercase()
+}
+
+/// The first two body lines joined, cut at 80 characters (never inside a character).
+fn body_snippet(body: &str) -> String {
+    let snippet = body.lines().take(2).collect::<Vec<_>>().join(" ");
+    if snippet.chars().count() > 80 {
+        format!("{}...", snippet.chars().take(80).collect::<String>())
+    } else {
+        snippet
+    }
 }
 
 fn warn_if_new_status(doc: &frump::FrumpDoc, status: &str) {
@@ -1692,7 +1745,8 @@ struct ListTask {
     task_type: String,
     subject: String,
     body: String,
-    properties: std::collections::BTreeMap<String, String>,
+    /// Keeps the order of the properties in the task file.
+    properties: IndexMap<String, String>,
 }
 
 impl From<&Task> for ListTask {
@@ -1762,107 +1816,15 @@ fn default_migration_destination(source: &Path) -> PathBuf {
     source.with_extension("")
 }
 
-fn dependency_ids(task: &Task) -> Vec<TaskId> {
-    task.get_property(&PropertyKey::new("Depends On").expect("constant is valid"))
-        .map(|value| {
-            value
-                .split(',')
-                .filter_map(|id| id.trim().parse::<u32>().ok())
-                .filter_map(|id| TaskId::new(id).ok())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn validate_dependencies(doc: &frump::FrumpDoc) -> Vec<String> {
-    let ids: std::collections::HashSet<_> = doc.tasks.tasks().iter().map(|task| task.id).collect();
-    let closed: std::collections::HashSet<_> = FrumpRepo::open(".")
-        .ok()
-        .and_then(|repo| repo.deleted_tasks().ok())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(id, _, _)| id)
-        .collect();
-    let mut errors = Vec::new();
-    for task in doc.tasks.tasks() {
-        if let Some(value) =
-            task.get_property(&PropertyKey::new("Depends On").expect("constant is valid"))
-        {
-            for raw in value.split(',') {
-                if raw.trim().is_empty()
-                    || raw
-                        .trim()
-                        .parse::<u32>()
-                        .ok()
-                        .and_then(|id| TaskId::new(id).ok())
-                        .is_none()
-                {
-                    errors.push(format!(
-                        "Task {} has invalid Depends On value '{}'",
-                        task.id,
-                        raw.trim()
-                    ));
-                }
-            }
-        }
-        for dependency in dependency_ids(task) {
-            if dependency == task.id {
-                errors.push(format!("Task {} depends on itself", task.id));
-            } else if !ids.contains(&dependency) && !closed.contains(&dependency) {
-                errors.push(format!(
-                    "Task {} references unknown dependency {}",
-                    task.id, dependency
-                ));
-            }
-        }
-    }
-    fn visit(
-        id: TaskId,
-        doc: &frump::FrumpDoc,
-        visiting: &mut std::collections::HashSet<TaskId>,
-        visited: &mut std::collections::HashSet<TaskId>,
-    ) -> bool {
-        if visited.contains(&id) {
-            return false;
-        }
-        if !visiting.insert(id) {
-            return true;
-        }
-        let cyclic = doc
-            .tasks
-            .find_by_id(id)
-            .map(|task| {
-                dependency_ids(task)
-                    .into_iter()
-                    .filter(|dependency| doc.tasks.find_by_id(*dependency).is_some())
-                    .any(|dependency| visit(dependency, doc, visiting, visited))
-            })
-            .unwrap_or(false);
-        visiting.remove(&id);
-        visited.insert(id);
-        cyclic
-    }
-    let mut visiting = std::collections::HashSet::new();
-    let mut visited = std::collections::HashSet::new();
-    for task in doc.tasks.tasks() {
-        if visit(task.id, doc, &mut visiting, &mut visited) {
-            errors.push("Dependency cycle detected".to_string());
-            break;
-        }
-    }
-    errors
-}
-
-fn print_dependency_tree(
+/// Print a task and its prerequisites as a tree. A prerequisite that is no longer on the board
+/// prints with its state instead of failing.
+fn print_prerequisite_tree(
     doc: &frump::FrumpDoc,
-    id: TaskId,
+    history: &BoardHistory,
+    task: &Task,
     depth: usize,
     seen: &mut std::collections::HashSet<TaskId>,
-) -> Result<()> {
-    let task = doc
-        .tasks
-        .find_by_id(id)
-        .ok_or_else(|| anyhow::anyhow!("Task {} not found.", id))?;
+) {
     println!(
         "{}{} {} - {}",
         "  ".repeat(depth),
@@ -1870,13 +1832,30 @@ fn print_dependency_tree(
         task.id,
         task.subject
     );
-    if !seen.insert(id) {
-        return Ok(());
+    if !seen.insert(task.id) {
+        return;
     }
-    for dependency in dependency_ids(task) {
-        print_dependency_tree(doc, dependency, depth + 1, seen)?;
+    let indent = "  ".repeat(depth + 1);
+    for prerequisite in prerequisites(task, doc, history) {
+        match prerequisite {
+            Prerequisite::Active { id, .. } => {
+                let found = doc
+                    .tasks
+                    .find_by_id(id)
+                    .expect("active prerequisite is on the board");
+                print_prerequisite_tree(doc, history, found, depth + 1, seen);
+            }
+            Prerequisite::Closed(id) => match history.last_state(id) {
+                Some(closed) => println!(
+                    "{indent}{} {} - {} (closed)",
+                    closed.task_type, closed.id, closed.subject
+                ),
+                None => println!("{indent}{id} (closed)"),
+            },
+            Prerequisite::Unknown(id) => println!("{indent}{id} (unknown task)"),
+            Prerequisite::Malformed(raw) => println!("{indent}'{raw}' (not a task number)"),
+        }
     }
-    Ok(())
 }
 
 fn search_similarity(query: &str, value: &str) -> f64 {

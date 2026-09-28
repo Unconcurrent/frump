@@ -30,12 +30,14 @@
 //!
 //! ## Modules
 //!
+//! - [`board`]: Rules shared by the CLI and the web board
 //! - [`domain`]: Core domain types (Task, Team, Properties)
 //! - [`parser`]: Markdown parsing and serialization
 //! - [`git`]: Git history integration
 //! - [`export`]: JSON/CSV import/export
 //! - [`templates`]: Task template management
 
+pub mod board;
 pub mod domain;
 pub mod export;
 pub mod git;
@@ -52,7 +54,7 @@ pub use domain::{
     TaskType, Team, TeamMember,
 };
 pub use export::{export_csv, export_json, import_json};
-pub use git::{ChangeType, FrumpRepo, TaskCommit, TaskHistory};
+pub use git::{BoardHistory, ChangeType, TaskCommit, TaskHistory};
 pub use notifications::{
     announce_assignment, assignment_announcement, notification_warning, notify_task_update,
     send_metateam_message,

@@ -73,7 +73,6 @@ pub fn parse(content: &str) -> Result<FrumpDoc> {
     let mut header = String::new();
     let mut team_members = Vec::new();
     let mut next = Vec::new();
-    let mut tasks = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
     let section = |name: &str| {
@@ -130,31 +129,7 @@ pub fn parse(content: &str) -> Result<FrumpDoc> {
         }
     }
 
-    // Parse Tasks section if present
-    if let Some(start) = tasks_start {
-        let mut i = start + 1;
-
-        while i < lines.len() {
-            let line = lines[i].trim();
-
-            // Start of a new task
-            if line.starts_with("### ") {
-                let task_start = i;
-                i += 1;
-
-                // Find the end of this task (next ### or end of file)
-                while i < lines.len() && !lines[i].trim().starts_with("### ") {
-                    i += 1;
-                }
-
-                if let Some(task) = parse_task(&lines[task_start..i])? {
-                    tasks.push(task);
-                }
-            } else {
-                i += 1;
-            }
-        }
-    }
+    let tasks = tasks_in(&lines, tasks_start)?;
 
     let team = Team::new(team_members);
     let task_collection = TaskCollection::new(tasks);
@@ -162,6 +137,48 @@ pub fn parse(content: &str) -> Result<FrumpDoc> {
     let mut doc = FrumpDoc::new(header, team, task_collection);
     doc.next = next;
     Ok(doc)
+}
+
+/// The tasks of a board's `## Tasks` section, read exactly as [`parse`] reads them, without
+/// reading the header, Team or Next sections. Git history uses it: a committed typo in the Team
+/// section must not make the task numbers of that commit unreadable.
+pub fn parse_tasks(content: &str) -> Result<Vec<Task>> {
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.trim().eq_ignore_ascii_case("## Tasks"));
+    tasks_in(&lines, start)
+}
+
+/// Tasks from the `## Tasks` line at `start` to the end of the file, one per `### ` heading.
+fn tasks_in(lines: &[&str], start: Option<usize>) -> Result<Vec<Task>> {
+    let mut tasks = Vec::new();
+    let Some(start) = start else {
+        return Ok(tasks);
+    };
+    let mut i = start + 1;
+
+    while i < lines.len() {
+        let line = lines[i].trim();
+
+        // Start of a new task
+        if line.starts_with("### ") {
+            let task_start = i;
+            i += 1;
+
+            // Find the end of this task (next ### or end of file)
+            while i < lines.len() && !lines[i].trim().starts_with("### ") {
+                i += 1;
+            }
+
+            if let Some(task) = parse_task(&lines[task_start..i])? {
+                tasks.push(task);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    Ok(tasks)
 }
 
 /// Serialize a Frump document to Markdown format.

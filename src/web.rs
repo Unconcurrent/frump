@@ -15,9 +15,10 @@ use std::{
     sync::Arc,
 };
 
+use crate::board::{apply_close, next_task_id, prepare_close};
 use crate::{
     announce_assignment, mark_updated, notification_warning, now_utc, send_metateam_message,
-    storage, validate_property_value, FrumpDoc, FrumpRepo, PropertyKey, Task, TaskId, TaskType,
+    storage, validate_property_value, BoardHistory, FrumpDoc, PropertyKey, Task, TaskId, TaskType,
 };
 
 #[derive(Clone)]
@@ -53,6 +54,14 @@ struct TaskDto {
 struct SavedTaskDto {
     #[serde(flatten)]
     task: TaskDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+}
+
+/// A closed task's number plus the warning that HEAD does not hold its current text.
+#[derive(Debug, Serialize)]
+struct ClosedTaskDto {
+    id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     warning: Option<String>,
 }
@@ -97,8 +106,9 @@ type ApiResult<T> = std::result::Result<T, ApiError>;
 /// Serve the embedded board on loopback. Document reads occur on each request so external edits
 /// are reflected by the browser's periodic refresh without maintaining a second source of truth.
 pub async fn serve(file: PathBuf, port: u16) -> Result<()> {
+    // One board identity, whatever path spelling the caller used.
     let state = AppState {
-        file: Arc::new(file),
+        file: Arc::new(crate::board::resolve_board(&file)?),
     };
     let app = Router::new()
         .route("/", get(index))
@@ -131,7 +141,7 @@ async fn create_task(
 ) -> ApiResult<Json<SavedTaskDto>> {
     let _lock = acquire_write_lock(&state.file)?;
     let mut doc = read_parsed_document(&state.file)?;
-    let id = next_task_id(&doc);
+    let id = next_task_id(&doc, &BoardHistory::load(&state.file)?)?;
     validate_new_property_values(&input.properties)?;
     let mut task = task_from_input(id, input)?;
     mark_updated(&mut task, &now_utc());
@@ -196,15 +206,22 @@ async fn update_task(
     }))
 }
 
-async fn delete_task(State(state): State<AppState>, Path(id): Path<u32>) -> ApiResult<StatusCode> {
+/// Delete is `frump close`: the same checks, and the same warning when the task's text is not in
+/// Git history. The warning goes back to the page; a request handler never prints.
+async fn delete_task(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+) -> ApiResult<Json<ClosedTaskDto>> {
     let _lock = acquire_write_lock(&state.file)?;
     let mut doc = read_parsed_document(&state.file)?;
-    let task_id = TaskId::new(id)?;
-    doc.tasks
-        .remove(task_id)
-        .ok_or_else(|| ApiError(anyhow::anyhow!("Task {id} not found")))?;
+    let history = BoardHistory::load(&state.file)?;
+    let results = prepare_close(&doc, &history, &[TaskId::new(id)?])?;
+    apply_close(&mut doc, &results);
     write_document(&state.file, &doc)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(ClosedTaskDto {
+        id,
+        warning: results.into_iter().next().and_then(|result| result.warning),
+    }))
 }
 
 async fn notify_task(
@@ -275,19 +292,6 @@ fn acquire_write_lock(file: &FsPath) -> Result<fs::File> {
         .open(lock_path)?;
     lock.lock_exclusive()?;
     Ok(lock)
-}
-
-fn next_task_id(doc: &FrumpDoc) -> TaskId {
-    if let Ok(repo) = FrumpRepo::open(".") {
-        if let Ok(Some(max_historical)) = repo.max_historical_id() {
-            return match doc.tasks.max_id() {
-                Some(current) if max_historical > current => max_historical.next(),
-                Some(current) => current.next(),
-                None => max_historical.next(),
-            };
-        }
-    }
-    doc.tasks.next_id()
 }
 
 fn task_from_input(id: TaskId, input: TaskInput) -> Result<Task> {

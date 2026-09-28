@@ -1,3 +1,3 @@
 pub mod repository;
 
-pub use repository::{ChangeType, FrumpRepo, TaskCommit, TaskHistory};
+pub use repository::{BoardHistory, ChangeType, TaskCommit, TaskHistory};

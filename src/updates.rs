@@ -29,10 +29,11 @@ pub fn append_update(task: &mut Task, text: &str, author: Option<&str>) -> Resul
     let attribution = author
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .map(|name| format!(" — {name}"))
+        .map(|name| format!(" - {name}"))
         .unwrap_or_default();
-    // A Markdown heading would be parsed as a task boundary by Frump's line-oriented format.
-    let entry = format!("_Update {timestamp}{attribution}_\n\n{text}");
+    // A plain line, as a person would type it. A Markdown heading would be parsed as a task
+    // boundary by Frump's line-oriented format.
+    let entry = format!("Update {timestamp}{attribution}\n\n{text}");
     task.body = if task.body.trim().is_empty() {
         entry
     } else {
@@ -52,11 +53,11 @@ mod tests {
         let mut task = Task::new(TaskId::new(1).unwrap(), TaskType::Task, "Example".into());
         append_update(&mut task, "Checked the result.", Some("data")).unwrap();
 
-        assert!(task.body.starts_with("_Update "));
-        assert!(task.body.contains(" — data_\n\nChecked the result."));
+        assert!(task.body.starts_with("Update "));
+        assert!(task.body.contains(" - data\n\nChecked the result."));
         assert_eq!(
             task.get_property(&PropertyKey::new(LAST_UPDATED_PROPERTY).unwrap()),
-            Some(&task.body[8..28])
+            Some(&task.body[7..27])
         );
     }
 }

@@ -72,7 +72,6 @@ pub fn write(path: &Path, doc: &FrumpDoc) -> Result<()> {
         TaskCollection::empty(),
     );
     general.next = doc.next.clone();
-    write_if_changed(&root.join("general.md"), &serialize_general(&general))?;
     let tasks_dir = root.join("tasks");
     let expected: BTreeSet<_> = doc
         .tasks
@@ -80,23 +79,36 @@ pub fn write(path: &Path, doc: &FrumpDoc) -> Result<()> {
         .iter()
         .map(|task| task.id.value())
         .collect();
+    // One file per task number: duplicate numbers would overwrite each other.
+    if expected.len() != doc.tasks.len() {
+        bail!(
+            "The board has duplicate task numbers, and a board directory holds one file per \
+             number. Run `frump renumber-duplicates` first."
+        );
+    }
+    write_if_changed(&root.join("general.md"), &serialize_general(&general))?;
     for task in doc.tasks.tasks() {
         let path = tasks_dir.join(format!("{}.md", task.id.value()));
         if !task_file_matches(&path, task) {
             write_if_changed(&path, &serialize_task(task))?;
         }
     }
+    // Every task now has its `<id>.md` file, so any other `.md` file holds a removed task or
+    // a task stored under another name (`foo.md` with task 9, now in `9.md`). Only task files
+    // are removed: the read path loads `.md` files, and anything else in `tasks/` (a backup
+    // such as `123.bak`) is not a task.
     for entry in fs::read_dir(&tasks_dir)? {
-        let entry = entry?;
-        if let Some(id) = entry
-            .path()
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "md") {
+            continue;
+        }
+        let canonical = path
             .file_stem()
             .and_then(|name| name.to_str())
             .and_then(|name| name.parse::<u32>().ok())
-        {
-            if !expected.contains(&id) {
-                fs::remove_file(entry.path())?;
-            }
+            .is_some_and(|id| expected.contains(&id) && path.ends_with(format!("{id}.md")));
+        if !canonical {
+            fs::remove_file(&path)?;
         }
     }
     Ok(())
@@ -204,7 +216,8 @@ pub fn migrate_single_file(source: &Path, destination: &Path) -> Result<()> {
     result
 }
 
-fn serialize_task(task: &Task) -> String {
+/// The canonical text of one task, as a directory board stores it in `tasks/<id>.md`.
+pub fn serialize_task(task: &Task) -> String {
     let doc = FrumpDoc::new(
         String::new(),
         crate::Team::empty(),

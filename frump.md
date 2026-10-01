@@ -80,3 +80,11 @@ Assigned To: Ruslan Sologub
 Status: done
 Last Updated: 2026-10-01T18:05:10Z
 
+### Bug 14 - Prevent restored-draft warnings when viewing untouched tasks
+
+Goal: viewing, selecting, resizing, expanding, saving, or closing an untouched task must preserve the original Markdown and must not create an unsaved draft. Diagnose editor update events, reproduce the issue with Markdown whose serialization changes its spelling, then suppress non-document updates at the editor boundary. Preserve real text and formatting edits, existing draft recovery, and concurrent-edit baselines. Verify browser behavior, frontend checks and full Rust tests, install the release system-wide without restarting user-owned servers, and record reusable findings in the owning project knowledge rule.
+
+Assigned To: Ruslan Sologub
+Status: working
+Last Updated: 2026-10-01T18:19:20Z
+

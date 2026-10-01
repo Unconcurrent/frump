@@ -10,20 +10,20 @@ readme = "README.md"
 keywords = ["tasks", "git", "markdown", "kanban", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 include = [
-    "src/**",
-    "tests/**",
-    "Cargo.toml",
-    "Cargo.lock",
-    "README.md",
-    "USAGE.md",
-    "TUTORIAL.md",
-    "LICENSE-MIT",
-    "ui/src/**",
-    "ui/tests/**",
-    "ui/*.ts",
-    "ui/index.html",
-    "ui/package.json",
-    "ui/package-lock.json",
+    "/src/**",
+    "/tests/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/USAGE.md",
+    "/TUTORIAL.md",
+    "/LICENSE-MIT",
+    "/ui/src/**",
+    "/ui/tests/**",
+    "/ui/*.ts",
+    "/ui/index.html",
+    "/ui/package.json",
+    "/ui/package-lock.json",
 ]
 
 [dependencies]

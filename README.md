@@ -80,7 +80,17 @@ frump web
 # Open http://127.0.0.1:3000
 ```
 
-The board edits `frump.md` directly and refreshes when the file changes externally. Its Delete button follows the same rules as `frump close`.
+The React board edits your Markdown directly and follows external file changes. It
+has board and list views, search across complete task bodies, property grouping,
+drag and drop, light and dark themes, and a task panel that docks beside the board
+or expands. Closing a panel keeps its draft; **Discard draft** removes unsaved
+changes. **Close completed task** follows the same rules as `frump close`.
+
+The browser loads compact card summaries, receives only changed cards on refresh,
+and fetches full task bodies when you open them. Unchanged refreshes return no JSON
+body, hidden tabs pause refreshes, and large task lists render only visible rows.
+Everything is embedded in the executable: no CDN, Node.js runtime, or separate
+frontend server is required.
 
 ### Authority workflow
 
@@ -381,7 +391,27 @@ Because with git they make a lovely couple.
 
 ## Contributing
 
-The CLI is in `src/main.rs`. The rules the CLI and the web board share (board path, task numbers, prerequisites, closing, input protection) are in `src/board.rs`; Git history is in `src/git`, board files in `src/storage.rs` and `src/parser`, and the web board in `src/web.rs`. Run `cargo test` before sending a change.
+The CLI is in `src/main.rs`. The rules the CLI and the web board share (board path, task numbers, prerequisites, closing, input protection) are in `src/board.rs`; Git history is in `src/git`, board files in `src/storage.rs` and `src/parser`, and the web API is in `src/web.rs` with its cached read model in `src/web/snapshot.rs`.
+
+The frontend source is in `ui/src`, using React, TypeScript, Radix Dialog,
+TanStack Virtual, and react-markdown. The checked-in build in `src/web/dist` is
+embedded by Rust, so ordinary `cargo build` and `cargo install` need only Rust.
+After changing frontend source, rebuild the assets before compiling Rust:
+
+```bash
+cd ui
+npm ci
+npm run build
+npm run test:unit
+npx playwright install chromium
+npm test
+cd ..
+cargo test
+```
+
+Browser tests run an isolated temporary board and the real local web server. For
+frontend development, run `frump web --port 3333` and `npm run dev` from `ui`; Vite
+proxies API calls to that board. Commit the regenerated assets with source changes.
 
 ## License
 

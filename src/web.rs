@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use fs2::FileExt;
@@ -12,8 +12,11 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
+
+mod snapshot;
+use snapshot::BoardCache;
 
 use crate::board::{apply_close, next_task_id, prepare_close};
 use crate::{
@@ -24,23 +27,24 @@ use crate::{
 #[derive(Clone)]
 struct AppState {
     file: Arc<PathBuf>,
+    cache: Arc<Mutex<BoardCache>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct DocumentDto {
     header: String,
     team: Vec<TeamMemberDto>,
     tasks: Vec<TaskDto>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct TeamMemberDto {
     name: String,
     email: String,
     role: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct TaskDto {
     id: u32,
     task_type: String,
@@ -66,7 +70,7 @@ struct ClosedTaskDto {
     warning: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PropertyDto {
     key: String,
     value: String,
@@ -78,6 +82,32 @@ struct TaskInput {
     subject: String,
     body: String,
     properties: Vec<PropertyDto>,
+    /// Optional compare-and-save baseline used by the browser. Older API clients remain valid.
+    expected: Option<ExpectedTask>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedTask {
+    task_type: String,
+    subject: String,
+    body: String,
+    properties: Vec<PropertyDto>,
+}
+
+impl ExpectedTask {
+    fn matches(&self, task: &Task) -> bool {
+        self.task_type == task.task_type.as_str()
+            && self.subject == task.subject
+            && self.body == task.body
+            && self.properties.len() == task.properties.len()
+            && self
+                .properties
+                .iter()
+                .zip(&task.properties)
+                .all(|(expected, actual)| {
+                    expected.key == actual.key.as_str() && expected.value == actual.value
+                })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,19 +133,29 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
-/// Serve the embedded board on loopback. Document reads occur on each request so external edits
-/// are reflected by the browser's periodic refresh without maintaining a second source of truth.
+/// Serve a self-contained board on loopback. Cached snapshots are invalidated by board-file
+/// metadata, including individual task files on directory boards. Markdown remains authoritative.
 pub async fn serve(file: PathBuf, port: u16) -> Result<()> {
     // One board identity, whatever path spelling the caller used.
     let state = AppState {
         file: Arc::new(crate::board::resolve_board(&file)?),
+        cache: Arc::new(Mutex::new(BoardCache::default())),
     };
     let app = Router::new()
         .route("/", get(index))
+        .route("/assets/app.js", get(javascript))
+        .route("/assets/app.css", get(stylesheet))
         .route("/api/document", get(document))
+        .route("/api/board", get(board))
+        .route("/api/search", get(search))
         .route("/api/tasks", post(create_task))
-        .route("/api/tasks/{id}", put(update_task).delete(delete_task))
+        .route(
+            "/api/tasks/{id}",
+            get(task).put(update_task).delete(delete_task),
+        )
         .route("/api/tasks/{id}/notify", post(notify_task))
+        // Task bodies have the same size semantics as CLI and Markdown edits.
+        .layer(DefaultBodyLimit::disable())
         .with_state(state);
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(address)
@@ -128,11 +168,76 @@ pub async fn serve(file: PathBuf, port: u16) -> Result<()> {
 }
 
 async fn index() -> Html<&'static str> {
-    Html(include_str!("web/index.html"))
+    Html(include_str!("web/dist/index.html"))
 }
 
-async fn document(State(state): State<AppState>) -> ApiResult<Json<DocumentDto>> {
-    Ok(Json(read_document(&state.file)?))
+async fn javascript() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("web/dist/assets/app.js"),
+    )
+}
+
+async fn stylesheet() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("web/dist/assets/app.css"),
+    )
+}
+
+/// Filesystem and parsing work stays off Tokio's request workers. A shared snapshot prevents
+/// each browser tab from independently reading, parsing and serializing an unchanged board.
+async fn cached<T: Send + 'static>(
+    state: AppState,
+    read: impl FnOnce(&BoardCache) -> Result<T> + Send + 'static,
+) -> ApiResult<T> {
+    tokio::task::spawn_blocking(move || {
+        let mut cache = state
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Board cache lock failed"))?;
+        cache.refresh(&state.file)?;
+        read(&cache)
+    })
+    .await
+    .map_err(|error| ApiError(error.into()))?
+    .map_err(ApiError)
+}
+
+async fn document(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
+    cached(state, move |cache| cache.document_response(&headers)).await
+}
+
+#[derive(Default, Deserialize)]
+struct BoardQuery {
+    since: Option<u64>,
+}
+
+async fn board(
+    State(state): State<AppState>,
+    Query(query): Query<BoardQuery>,
+) -> ApiResult<Response> {
+    cached(state, move |cache| cache.board_response(query.since)).await
+}
+
+async fn task(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    cached(state, move |cache| cache.task_response(id, &headers)).await
+}
+
+#[derive(Default, Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+async fn search(
+    State(state): State<AppState>,
+    Query(query): Query<SearchQuery>,
+) -> ApiResult<Json<Vec<u32>>> {
+    cached(state, move |cache| Ok(Json(cache.search(&query.q)))).await
 }
 
 async fn create_task(
@@ -168,6 +273,17 @@ async fn update_task(
     let _lock = acquire_write_lock(&state.file)?;
     let mut doc = read_parsed_document(&state.file)?;
     let task_id = TaskId::new(id)?;
+    if let Some(expected) = &input.expected {
+        let current = doc
+            .tasks
+            .find_by_id(task_id)
+            .ok_or_else(|| ApiError(anyhow::anyhow!("Task {id} not found")))?;
+        if !expected.matches(current) {
+            return Err(ApiError(anyhow::anyhow!(
+                "This task changed before the save completed. Your draft is kept. Reload the task or keep your draft before saving again."
+            )));
+        }
+    }
     let new_status = input
         .properties
         .iter()
@@ -269,6 +385,7 @@ fn assignment_warning(task: &Task, assignee: &str) -> Option<String> {
         .map(|error| notification_warning(&error))
 }
 
+#[cfg(test)]
 fn read_document(file: &FsPath) -> Result<DocumentDto> {
     Ok(document_to_dto(&read_parsed_document(file)?))
 }
@@ -386,6 +503,7 @@ mod tests {
                         value: "open".to_string(),
                     },
                 ],
+                expected: None,
             },
         )
         .unwrap();

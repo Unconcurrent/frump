@@ -99,33 +99,45 @@ Commit only the task board with a short message:
 frump commit --message "Record completed validation"
 ```
 
-Group the columns by `Status` or by any other property in the file, filter with
-the search box or the type picker, reorder and collapse columns, and switch
-sort, density or theme from the toolbar. Layout choices, the search text and the scroll
-positions are stored per board in the browser, never in the Markdown file, so a
-reload returns to the same view. The open task and the notify panel are part of
-the URL: reloading reopens them together with any unsaved draft, and Back steps
-out. Saving keeps the task open; the close button reads Cancel when there are
-unsaved changes and Close when there are none, and leaving without deciding
-keeps the work for when the task is reopened. Keyboard: `/` search, `n` new task,
-`Alt` plus arrow keys to move the focused card, `Escape` to close the dialog.
+The React interface offers **Board** and **List** views. Group columns by `Status`
+or any other property, search the complete task text, and filter by type or
+assignee. The sidebar shows all tasks, completed tasks, team filters, and board
+progress. Reorder columns with their arrow controls, collapse them, and use
+**Display** for compact cards, hiding empty columns, or resetting the layout.
+The theme button cycles through system, dark, and light modes. Preferences,
+filters, column layouts, and scroll positions are saved per board in the browser.
 
-Task bodies render as Markdown on the cards, and the body field continues lists
-and quotes as you type, renumbers ordered lists, indents with Tab, wraps the
-selection with Ctrl+B, Ctrl+I and Ctrl+K, and saves with Ctrl+Enter. Status,
-type and property values are offered as dropdowns built from the values already
-used in the file, and still accept new values. Clicking a card opens it beside the board,
-under the toolbar; the divider resizes the panel by drag or arrow keys and a
-double click resets it, and a header button switches to full screen and back. Sorting includes `Last
-updated`, newest first, from the `Last Updated` property; tasks without one sort
-last. The board refreshes in place — unchanged cards keep their scroll
-position and focus, changed cards flash — and a refresh never interrupts a drag.
+Opening a task docks its details beside the board; the divider resizes the panel
+by drag or arrow keys and a double click resets it. Expand the task view from its
+header, or use the previous and next controls to navigate tasks. On small screens
+the task opens as a dialog. The open task and notification panel are in the URL,
+so a reload restores the view. Switching tasks keeps a single selection; closing
+always returns to the board. Saving keeps the task open. Unsaved drafts are kept
+independently per task when switching, closing, or reloading. **Discard draft**
+explicitly removes one. Keyboard: `/` search, `n` new task, `Alt` plus arrow keys
+to move a focused card between columns, `Escape` to close the task view.
 
-Editing is safe against concurrent writes: an external change never discards an
-open draft, it raises a conflict notice in the task view offering reload or
-keep, and a task deleted underneath an edit can be saved as a new task. The
-notify control on a card or in the task view sends a message about that task to
-a crew member through Metateam.
+Cards show short body excerpts. The task view renders Markdown with a **Write**
+and **Preview** toggle, including tables and checklists. The body editor continues
+lists and quotes, increments ordered list markers, indents lists or selected
+lines with Tab, wraps selections with Ctrl+B, Ctrl+I and Ctrl+K, and saves with
+Ctrl+Enter (Command shortcuts also work). Type, status, and property fields offer
+existing values and accept new ones. `Last updated` sorting places the newest
+tasks first and tasks without timestamps last.
+
+The browser loads compact summaries, receives only changed summaries, and
+downloads a full body only when its task is opened or changed. An unchanged
+refresh returns no JSON body; polling pauses while the tab is hidden. Large
+columns and lists render only visible rows. Search runs against complete task
+bodies on the server without downloading those bodies to the browser.
+
+An external change updates a clean task view and preserves a dirty draft with
+**Reload from file** and **Keep my draft** choices. Saving also checks the original
+task under the board write lock, so an edit arriving between refresh and save
+cannot silently overwrite newer text. A draft of a removed task can be saved as
+a new task, including after a reload. **Close completed task** follows the same
+rules as `frump close`. **Notify**, on a card or in its details, sends a message
+about that task to a crew member through Metateam.
 
 ## Getting Started
 

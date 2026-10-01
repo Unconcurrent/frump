@@ -18,6 +18,12 @@ include = [
     "USAGE.md",
     "TUTORIAL.md",
     "LICENSE-MIT",
+    "ui/src/**",
+    "ui/tests/**",
+    "ui/*.ts",
+    "ui/index.html",
+    "ui/package.json",
+    "ui/package-lock.json",
 ]
 
 [dependencies]

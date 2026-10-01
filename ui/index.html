@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f7f8fa" />
+    <script>
+      (() => {
+        let mode = 'auto';
+        try { mode = JSON.parse(localStorage.getItem('frump:theme') || '"auto"'); } catch {}
+        const theme = mode === 'dark' || mode === 'light' ? mode : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.dataset.theme = theme;
+        document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#15181f' : '#f7f8fa';
+      })();
+    </script>
     <title>Frump · Task board</title>
   </head>
   <body>

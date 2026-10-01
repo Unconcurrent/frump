@@ -84,9 +84,9 @@ The React board edits your Markdown directly and follows external file changes. 
 has board and list views, search across complete task bodies, property grouping,
 draggable group headers, light and dark themes, and a task panel that docks beside
 the board or expands. Its unified rich editor renders Markdown as you edit, with
-formatting controls for headings, lists, checklists, links, code, and tables. Hide
-the navigation sidebar completely and restore it from the board heading; board
-information and theme controls live in the footer. Closing a panel keeps its draft; **Discard draft** removes unsaved
+formatting controls for headings, lists, checklists, links, code, and tables. Board
+progress sits beside the heading, with board information and theme controls in
+the footer. Closing a panel keeps its draft; **Discard draft** removes unsaved
 changes. **Close completed task** follows the same rules as `frump close`.
 
 The browser loads compact card summaries, receives only changed cards on refresh,

@@ -83,15 +83,24 @@ test('opening and saving preserves source and editing retains embedded HTML', as
   await expect.poll(async () => (await (await request.get('/api/tasks/2')).json()).body).toContain('<!-- edited comment -->');
 });
 
-test('sidebar hides completely, restores from the heading and remembers its visibility', async ({ page }) => {
+test('board progress sits beside the heading and stays based on the full board', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
   await expect(page.getByRole('navigation', { name: 'Task views' })).toHaveCount(0);
-  await page.reload();
-  await expect(page.getByRole('navigation', { name: 'Task views' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Show sidebar', exact: true }).click();
-  await expect(page.getByRole('navigation', { name: 'Task views' })).toBeVisible();
-  await expect(page.getByText('Local workspace', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Show sidebar', exact: true })).toHaveCount(0);
+  const progress = page.getByRole('progressbar', { name: 'Board progress', exact: true });
+  await expect(progress).toHaveAttribute('aria-valuenow', '33');
+  await expect(page.getByText('1 of 3 tasks complete', { exact: true })).toBeVisible();
+  const heading = (await page.getByRole('heading', { name: /Project board/ }).boundingBox())!;
+  const meter = (await page.locator('.board-progress').boundingBox())!;
+  expect(meter.x).toBeGreaterThanOrEqual(heading.x + heading.width);
+  expect(Math.abs(meter.y + meter.height / 2 - heading.y - heading.height / 2)).toBeLessThan(5);
+  await page.getByText('Display', { exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Completed tasks only', exact: true }).check();
+  await expect(page.getByRole('button', { name: 'Design the navigation', exact: true })).toHaveCount(0);
+  await expect(progress).toHaveAttribute('aria-valuenow', '33');
+  writeFileSync(boardPath, readFileSync(boardPath, 'utf8').replace('Status: open', 'Status: done'));
+  await expect(progress).toHaveAttribute('aria-valuenow', '67', { timeout: 6000 });
+  await expect(page.getByText('2 of 3 tasks complete', { exact: true })).toBeVisible();
 });
 
 test('group headers reorder by pointer and keyboard and remember their order', async ({ page }) => {
@@ -167,14 +176,13 @@ test('list continuation, nesting and normal Tab focus remain usable', async ({ p
   await expect(body).not.toBeFocused();
 });
 
-test('mobile navigation opens as a drawer and dismisses with Escape', async ({ page }) => {
+test('mobile progress and completed filtering fit without a sidebar', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Show sidebar', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Task navigation', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Completed', exact: false }).click();
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog', { name: 'Task navigation', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('progressbar', { name: 'Board progress', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Show sidebar', exact: true })).toHaveCount(0);
+  await page.locator('.view-options summary').click();
+  await page.getByRole('checkbox', { name: 'Completed tasks only', exact: true }).check();
   await expect(page.getByRole('heading', { name: /Completed tasks/ })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

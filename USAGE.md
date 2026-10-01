@@ -101,9 +101,9 @@ frump commit --message "Record completed validation"
 
 The React interface offers **Board** and **List** views. Group columns by `Status`
 or any other property, search the complete task text, and filter by type or
-assignee. The sidebar shows all tasks, completed tasks, team filters, and board
-progress. Hide the sidebar with its header control and restore it from the Frump
-icon in the board heading. On small screens it opens as a dismissible drawer.
+assignee. Board progress appears beside the heading, showing the percentage and
+completed/total task count for the entire board. Use **Display → Completed tasks
+only** to focus on finished tasks.
 Reorder groups by dragging their headers, or focus a header and press Space,
 arrow keys, then Space to finish (Escape cancels). Collapse groups and use
 **Display** for compact cards, hiding empty columns, or resetting the layout.

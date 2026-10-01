@@ -72,7 +72,11 @@ Last Updated: 2026-10-01T17:55:35Z
 
 Remove the entire task navigation sidebar and its restore controls. Place board progress horizontally beside the Project board heading, showing the percentage and completed/total count. Keep progress based on the whole board when filters are active, maintain completed filtering in Display, and fit narrow screens without a side rail. Update source, embedded assets, documentation and affected browser checks, validate the real server and install into the existing system-wide executable. Preserve the user-managed server lifecycle.
 
+Update 2026-10-01T18:05:10Z - data
+
+Implemented board progress as one horizontal summary immediately after the heading: progress label and meter, percentage, and completed/total count. Counts remain based on the entire board when filtering. Removed the complete sidebar, its mobile drawer, restore icon, visibility preference, and superseded styling. Completed filtering remains available in Display and assignee filtering is available in the toolbar at all viewport widths. Updated documentation and rebuilt the embedded assets. Validation: all 143 Rust tests, 30 browser checks and 7 frontend unit tests passed; TypeScript and release builds passed. Desktop and mobile renders inspected. The installed system-wide executable was separately checked on an isolated ephemeral server with 31 tasks and 18 completed: it displays 58% horizontally beside the heading, has no sidebar, and fits the mobile viewport. Updated the existing root-owned /usr/local/bin/frump through the retained authorized root shell. User-managed servers were left running; only the isolated smoke server was stopped. Logs are in /tmp/frump-heading-rust.log, /tmp/frump-heading-browser.log, /tmp/frump-heading-unit.log, /tmp/frump-heading-build.log and /tmp/frump-heading-release.log. Self-review: the heading owns the progress presentation; obsolete sidebar authority is removed completely. KB learning audit: no new reusable failure was discovered. Existing frump/web/frontend-build-and-controls and frump/engineering/system-installation cover the validation, asset installation and preservation of user-managed server lifecycle and were followed. PASS
+
 Assigned To: Ruslan Sologub
-Status: working
-Last Updated: 2026-10-01T17:56:39Z
+Status: done
+Last Updated: 2026-10-01T18:05:10Z
 

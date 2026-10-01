@@ -56,7 +56,11 @@ Update 2026-10-01T17:18:07Z - data
 
 Captain clarified: remove the workspace feature entirely. Also fix dark mode, including the page background, theme persistence, system preference changes and all editor/dialog surfaces.
 
+Update 2026-10-01T17:52:56Z - data
+
+Implementation and self-review: replaced the separate Markdown writer/preview with one Tiptap editor and formatting toolbar. Body conversion is local to MarkdownEditor and richMarkdown; opening an untouched task retains its exact source, while comments, HTML and reference definitions remain editable and survive nearby changes. Removed the superseded renderer and textarea shortcut authority. Group reordering now belongs to sortable group headers with pointer, touch and keyboard support; removed reorder arrows and verified cancellation preserves an open task and resumes polling. Removed the workspace placeholder entirely, kept task/team navigation in a fully hideable sidebar with its restore icon in the board heading and a mobile drawer. Removed the topbar and moved board information, refresh and theme controls into the compact heading/footer. Fixed dark root/body backgrounds, readable controls and saved status, system preference changes, persisted choice and the initial loading theme. Validation: 143 Rust tests, 30 real-server browser tests, 7 frontend unit tests, TypeScript/build, formatting, clippy with warnings denied and verified cargo package passed. Full outputs retained in /tmp/frump-ui-rust-tests.log, /tmp/frump-ui-browser.log, /tmp/frump-ui-unit.log, /tmp/frump-ui-clippy.log and /tmp/frump-ui-package.log. Actual desktop, mobile and dark renders inspected. Large-board idle regression still transferred 994 JSON bytes over 4.5 seconds with empty unchanged responses. Updated the existing root-owned /usr/local/bin/frump through the retained authorized root shell; command resolution has no user-local copy. Restarted the existing board server at its same loopback address while preserving its directory and environment, then verified its actual rendered editor, dark background, sidebar controls, closing and empty idle responses. KB learning audit: created frump/web/markdown-editing for source preservation, isolated parser registration and keyboard-save ordering; extended frump/web/frontend-build-and-controls for theme startup/surfaces and group drag lifecycle. Existing frump/engineering/system-installation remains complete and was followed. All requested behavior is implemented and verified. PASS
+
 Assigned To: Ruslan Sologub
-Status: working
-Last Updated: 2026-10-01T17:18:07Z
+Status: done
+Last Updated: 2026-10-01T17:52:56Z
 

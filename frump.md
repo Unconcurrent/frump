@@ -52,7 +52,11 @@ Last Updated: 2026-10-01T17:04:49Z
 
 Create one polished Markdown editing surface with inline formatting and rendering. Reorder groups by dragging their headers instead of small arrow controls. Remove workspace creation and switching, retaining a fully hideable task navigation and team-filter sidebar with its restore icon in the board heading. Merge the topbar into the heading and footer. Plan: use a maintained Markdown-aware editor with React controls, preserve task body data and independent drafts; use a sortable group interaction with pointer and keyboard support; remove superseded topbar and workspace UI; persist sidebar visibility and group order; verify the existing UI and bandwidth regressions plus new editor, reorder and layout behavior. Build embedded assets and update the existing system-wide executable through the authorized root shell.
 
+Update 2026-10-01T17:18:07Z - data
+
+Captain clarified: remove the workspace feature entirely. Also fix dark mode, including the page background, theme persistence, system preference changes and all editor/dialog surfaces.
+
 Assigned To: Ruslan Sologub
 Status: working
-Last Updated: 2026-10-01T17:11:42Z
+Last Updated: 2026-10-01T17:18:07Z
 

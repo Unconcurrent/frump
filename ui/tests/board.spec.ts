@@ -87,11 +87,10 @@ test('back, forward, full-screen and Escape preserve a single task selection', a
   await expect(page.getByRole('textbox', { name: 'Subject', exact: true })).toHaveCount(0);
   await page.goForward();
   await expect(page.getByRole('textbox', { name: 'Subject', exact: true })).toHaveValue('Repair the task panel');
-  await page.getByRole('button', { name: 'Write', exact: true }).click();
   await page.getByRole('textbox', { name: 'Body', exact: true }).fill('A preserved draft.');
   await page.getByRole('button', { name: 'Expand task view' }).click();
   await expect(page.getByRole('dialog', { name: 'Task details' })).toBeVisible();
-  await expect(page.getByRole('textbox', { name: 'Body', exact: true })).toHaveValue('A preserved draft.');
+  await expect(page.getByRole('textbox', { name: 'Body', exact: true })).toHaveText('A preserved draft.');
   await page.getByRole('button', { name: 'Dock task panel' }).click();
   await page.getByRole('textbox', { name: 'Body', exact: true }).focus();
   await page.keyboard.press('Escape');
@@ -223,7 +222,7 @@ test('desktop layouts render without browser errors or external runtime dependen
   await expect(page.getByRole('textbox', { name: 'Subject', exact: true })).toBeVisible();
   await page.screenshot({ path: '/tmp/frump-board-editor.png' });
   await page.getByRole('button', { name: 'Change theme', exact: true }).click();
-  await page.screenshot({ path: '/tmp/frump-board-dark.png' });
+  await page.screenshot({ path: '/tmp/frump-board-dark.png', animations: 'disabled' });
   expect(errors).toEqual([]);
   expect(external).toEqual([]);
 });

@@ -102,9 +102,13 @@ frump commit --message "Record completed validation"
 The React interface offers **Board** and **List** views. Group columns by `Status`
 or any other property, search the complete task text, and filter by type or
 assignee. The sidebar shows all tasks, completed tasks, team filters, and board
-progress. Reorder columns with their arrow controls, collapse them, and use
+progress. Hide the sidebar with its header control and restore it from the Frump
+icon in the board heading. On small screens it opens as a dismissible drawer.
+Reorder groups by dragging their headers, or focus a header and press Space,
+arrow keys, then Space to finish (Escape cancels). Collapse groups and use
 **Display** for compact cards, hiding empty columns, or resetting the layout.
-The theme button cycles through system, dark, and light modes. Preferences,
+The footer theme button switches between dark and light. Select **System** in
+**Display → Theme** to follow the operating system. Preferences,
 filters, column layouts, and scroll positions are saved per board in the browser.
 
 Opening a task docks its details beside the board; the divider resizes the panel
@@ -117,11 +121,15 @@ independently per task when switching, closing, or reloading. **Discard draft**
 explicitly removes one. Keyboard: `/` search, `n` new task, `Alt` plus arrow keys
 to move a focused card between columns, `Escape` to close the task view.
 
-Cards show short body excerpts. The task view renders Markdown with a **Write**
-and **Preview** toggle, including tables and checklists. The body editor continues
-lists and quotes, increments ordered list markers, indents lists or selected
-lines with Tab, wraps selections with Ctrl+B, Ctrl+I and Ctrl+K, and saves with
-Ctrl+Enter (Command shortcuts also work). Type, status, and property fields offer
+Cards show short body excerpts. The unified description editor renders Markdown
+while editing, with controls for headings, bold, italic, strike, lists,
+checklists, quotes, code, links, images, and tables. Paste Markdown or type
+Markdown shortcuts such as `## ` and `- ` at the start of a line. Ctrl+B, Ctrl+I,
+and Ctrl+K format selections or add links; Ctrl+Enter saves (Command shortcuts
+also work). Lists continue on Enter and nest with Tab; Tab outside a list moves
+focus normally. Opening or saving an untouched body preserves its original
+Markdown exactly. HTML, comments, and reference definitions remain editable
+as source blocks and survive edits to nearby text. Type, status, and property fields offer
 existing values and accept new ones. `Last updated` sorting places the newest
 tasks first and tasks without timestamps last.
 

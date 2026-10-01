@@ -1,6 +1,9 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ArrowLeft, ArrowRight, Bell, ChevronDown, ChevronRight, FileText, Plus, SearchX } from 'lucide-react';
+import { Bell, ChevronDown, ChevronRight, FileText, GripVertical, Plus, SearchX } from 'lucide-react';
+import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { SortableContext, arrayMove, horizontalListSortingStrategy, sortableKeyboardCoordinates, useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { readStored, store } from './hooks';
 import { columnLabel, UNSET, valueOf, type Summary } from './types';
 
@@ -54,9 +57,9 @@ type ColumnProps = Omit<CardProps, 'task' | 'selected'> & {
   label: string; columnKey: string; tasks: Summary[]; selected: number | 'new' | null;
   collapsed: boolean; storageKey: string; onCollapse: () => void;
   onAdd: () => void; onDrop: (id: number) => void;
-  onReorder: (direction: number) => void; first: boolean; last: boolean;
 };
-function Column({ label, columnKey, tasks, selected, compact, collapsed, storageKey, onCollapse, onAdd, onDrop, onReorder, first, last, ...cardProps }: ColumnProps) {
+function Column({ label, columnKey, tasks, selected, compact, collapsed, storageKey, onCollapse, onAdd, onDrop, ...cardProps }: ColumnProps) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: columnKey });
   const scroller = useRef<HTMLDivElement>(null);
   const [over, setOver] = useState(false);
   const scrollKey = `${storageKey}:scroll:${columnKey}`;
@@ -65,7 +68,7 @@ function Column({ label, columnKey, tasks, selected, compact, collapsed, storage
     estimateSize: () => compact ? 124 : 194, overscan: 4,
     getItemKey: index => tasks[index].id, initialOffset: () => readStored(scrollKey, 0),
   });
-  return <section aria-label={`${label} column`} className={`board-column ${collapsed ? 'collapsed' : ''} ${over ? 'drop-target' : ''}`} onDragOver={event => {
+  return <section ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition, zIndex: isDragging ? 2 : undefined }} aria-label={`${label} column`} className={`board-column ${isDragging ? 'group-dragging' : ''} ${collapsed ? 'collapsed' : ''} ${over ? 'drop-target' : ''}`} onDragOver={event => {
     if (!event.dataTransfer.types.includes('application/frump-task')) return;
     event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setOver(true);
   }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setOver(false); }} onDrop={event => {
@@ -73,13 +76,12 @@ function Column({ label, columnKey, tasks, selected, compact, collapsed, storage
     const id = Number(event.dataTransfer.getData('application/frump-task'));
     if (id) onDrop(id);
   }}>
-    <div className="column-header"><span className={`status-dot tone-${toneFor(label)}`} />
-      <button className="column-title" onClick={onCollapse} aria-expanded={!collapsed}>{label}</button>
-      <span className="column-count">{tasks.length}</span>
+    <div className="column-header">
+      <button ref={setActivatorNodeRef} className="column-drag" {...attributes} {...listeners} aria-label={`Drag ${label} group`} title="Drag to reorder. Space then arrow keys also moves this group.">
+        <GripVertical className="group-grip" size={15} /><span className={`status-dot tone-${toneFor(label)}`} /><span className="column-title">{label}</span><span className="column-count">{tasks.length}</span>
+      </button>
       <div className="column-tools">
-        {!collapsed && <><button className="icon-button" disabled={first} onClick={() => onReorder(-1)} aria-label={`Move ${label} column left`}><ArrowLeft size={13} /></button>
-          <button className="icon-button" disabled={last} onClick={() => onReorder(1)} aria-label={`Move ${label} column right`}><ArrowRight size={13} /></button>
-          <button className="icon-button" onClick={onAdd} aria-label={`Add task to ${label}`}><Plus size={16} /></button></>}
+        {!collapsed && <button className="icon-button" onClick={onAdd} aria-label={`Add task to ${label}`}><Plus size={16} /></button>}
         <button className="icon-button" onClick={onCollapse} aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${label} column`}>{collapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}</button>
       </div>
     </div>
@@ -102,6 +104,10 @@ export type BoardViewProps = {
   onLayout: (order: string[], collapsed: string[]) => void;
 };
 export function BoardView({ tasks, allTasks, group, compact, selected, order, collapsed, hideEmpty, storageKey, onLayout, onOpen, onNotify, onNew, onMove }: BoardViewProps) {
+  const dragging = useRef(false);
+  const endDrag = () => { dragging.current = false; document.dispatchEvent(new Event('frump:group-drag-end')); };
+  useEffect(() => () => { if (dragging.current) endDrag(); }, []);
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
   const scroller = useRef<HTMLDivElement>(null);
   const groups = new Map<string, Summary[]>();
   for (const task of allTasks) groups.set(valueOf(task, group), []);
@@ -119,17 +125,20 @@ export function BoardView({ tasks, allTasks, group, compact, selected, order, co
     if (index >= 0 && index < keys.length) onMove(id, keys[index]);
   };
   if (allTasks.length > 0 && !tasks.length) return <Empty icon="search" title="No tasks match your filters" description="Try a different search or clear the filters to see your board." />;
-  return <div className="board" ref={scroller} onScroll={event => store(`${storageKey}:horizontal`, event.currentTarget.scrollLeft)}>
-    {visible.map((key, index) => <Column key={key} columnKey={key} label={columnLabel(key, group)} tasks={groups.get(key)!} selected={selected}
+  return <DndContext sensors={sensors} collisionDetection={closestCenter}
+    onDragStart={() => { dragging.current = true; document.dispatchEvent(new Event('frump:group-drag-start')); }}
+    onDragCancel={endDrag}
+    onDragEnd={({ active, over }) => {
+      if (over && active.id !== over.id) onLayout(arrayMove(keys, keys.indexOf(String(active.id)), keys.indexOf(String(over.id))), collapsed);
+      endDrag();
+    }}><SortableContext items={visible} strategy={horizontalListSortingStrategy}><div className="board" ref={scroller} onScroll={event => store(`${storageKey}:horizontal`, event.currentTarget.scrollLeft)}>
+    {visible.map(key => <Column key={key} columnKey={key} label={columnLabel(key, group)} tasks={groups.get(key)!} selected={selected}
       compact={compact} collapsed={collapsed.includes(key)} storageKey={storageKey}
-      first={index === 0} last={index === visible.length - 1} onOpen={onOpen} onNotify={onNotify} onMove={moveDirection}
+      onOpen={onOpen} onNotify={onNotify} onMove={moveDirection}
       onCollapse={() => onLayout(keys, collapsed.includes(key) ? collapsed.filter(k => k !== key) : [...collapsed, key])}
-      onAdd={() => onNew(key)} onDrop={id => onMove(id, key)} onReorder={direction => {
-        const copy = [...keys], at = copy.indexOf(key), to = copy.indexOf(visible[index + direction]);
-        if (to < 0) return;
-        copy.splice(at, 1); copy.splice(to, 0, key); onLayout(copy, collapsed);
-      }} />)}
-  </div>;
+      onAdd={() => onNew(key)} onDrop={id => onMove(id, key)} />)}
+  </div></SortableContext></DndContext>;
+
 }
 
 export function Empty({ icon = 'file', title, description }: { icon?: 'file' | 'search'; title: string; description: string }) {

@@ -38,11 +38,14 @@ export function useBoard() {
     const dragEnded = () => { dragging = false; void refresh(); };
     document.addEventListener('dragstart', dragStarted);
     document.addEventListener('dragend', dragEnded);
+    document.addEventListener('frump:group-drag-start', dragStarted);
+    document.addEventListener('frump:group-drag-end', dragEnded);
     void refresh();
     return () => {
       disposed = true; clearTimeout(timer); active?.abort();
       document.removeEventListener('visibilitychange', visibility);
       document.removeEventListener('dragstart', dragStarted); document.removeEventListener('dragend', dragEnded);
+      document.removeEventListener('frump:group-drag-start', dragStarted); document.removeEventListener('frump:group-drag-end', dragEnded);
     };
   }, []);
   return { board, error, refresh: useCallback(() => refreshRef.current(), []) };

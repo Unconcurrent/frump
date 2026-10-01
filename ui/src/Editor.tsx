@@ -1,10 +1,9 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { AlertCircle, Bell, Check, ChevronLeft, ChevronRight, LoaderCircle, Maximize2, Minimize2, Plus, Save, Trash2, X } from 'lucide-react';
 import { fetchTask, request, RequestError, saveTask } from './api';
 import { readStored, store } from './hooks';
-import { Markdown } from './Markdown';
-import { markdownKey } from './markdownKeys';
+import { MarkdownEditor } from './MarkdownEditor';
 import { emptyTask, sameInput, UNSET, valueOf, withProperty, type Board, type Task, type TaskInput } from './types';
 
 type Draft = { form: TaskInput; base: TaskInput };
@@ -17,7 +16,6 @@ export function Editor({ id, board, boardKey, preset, available, onClose, onSave
   const [form, setForm] = useState<TaskInput | null>(null), [base, setBase] = useState<TaskInput | null>(null);
   const [current, setCurrent] = useState<Task | null>(null), [error, setError] = useState('');
   const [busy, setBusy] = useState(false), [conflict, setConflict] = useState<'changed' | 'removed' | 'restored' | null>(null);
-  const [tab, setTab] = useState<'write' | 'preview'>(id === 'new' ? 'write' : 'preview');
   const [full, setFull] = useState(false), [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 900px)').matches);
   const [width, setWidth] = useState(() => readStored(`${boardKey}:panel-width`, 520));
   const [saved, setSaved] = useState(false);
@@ -120,13 +118,6 @@ export function Editor({ id, board, boardKey, preset, available, onClose, onSave
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
-  function textKey(event: KeyboardEvent<HTMLTextAreaElement>) {
-    const input = event.currentTarget;
-    const edit = markdownKey(input.value, input.selectionStart, input.selectionEnd, event.key, event.ctrlKey || event.metaKey, event.shiftKey);
-    if (!edit) return;
-    event.preventDefault(); setForm(form => form ? { ...form, body: edit.value } : form);
-    requestAnimationFrame(() => { input.selectionStart = edit.start; input.selectionEnd = edit.end; });
-  }
   const keys = [...new Set(['Priority', 'Assigned To', 'Tags', 'Due Date', 'Depends On', ...board.tasks.flatMap(task => task.properties.map(p => p.key))])].filter(key => !['Status', 'Last Updated'].includes(key));
   const values = (key: string) => [...new Set(board.tasks.flatMap(task => task.properties.filter(p => p.key === key).map(p => p.value)))];
   const index = board.tasks.findIndex(task => task.id === id);
@@ -164,8 +155,8 @@ export function Editor({ id, board, boardKey, preset, available, onClose, onSave
             <button type="button" className="icon-button" aria-label={`Remove ${property.key || 'property'}`} onClick={() => setForm({ ...form, properties: form.properties.filter((_, i) => i !== at) })}><X size={15} /></button>
           </div>)}
         </div>
-        <div className="description-section"><div className="description-heading"><span className="section-label">DESCRIPTION</span><div className="segmented"><button type="button" aria-pressed={tab === 'write'} onClick={() => setTab('write')}>Write</button><button type="button" aria-pressed={tab === 'preview'} onClick={() => setTab('preview')}>Preview</button></div></div>
-          {tab === 'write' ? <><label className="sr-only" htmlFor={`${listId}-body`}>Body</label><textarea id={`${listId}-body`} className="body-input" value={form.body} onChange={event => setForm({ ...form, body: event.target.value })} onKeyDown={textKey} placeholder="Add context, a plan, or the details that matter…" /><p className="editor-tip">Markdown supported · ⌘ / Ctrl + Enter to save</p></> : form.body ? <Markdown text={form.body} /> : <button type="button" className="description-empty" onClick={() => setTab('write')}>Add a description…</button>}
+        <div className="description-section"><div className="description-heading"><span className="section-label">DESCRIPTION</span><span className="editor-tip">Markdown · Ctrl / ⌘ + Enter to save</span></div>
+          <MarkdownEditor value={form.body} disabled={busy} onChange={body => setForm(current => current ? { ...current, body } : current)} />
         </div>
         {valueOf(form, 'Last Updated') !== UNSET && <p className="updated-at">Last updated {valueOf(form, 'Last Updated').replace('T', ' ').replace('Z', ' UTC')}</p>}
       </fieldset>

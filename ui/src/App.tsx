@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowUpRight, CheckCheck, ChevronDown, Circle, Columns3, Command, LayoutList, LoaderCircle, Moon, Plus, RefreshCw, Search, SlidersHorizontal, Sun, Users, X } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { AlertCircle, CheckCheck, Columns3, Command, LayoutList, LoaderCircle, Moon, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, SlidersHorizontal, Sun, Users, X } from 'lucide-react';
+import * as Dialog from '@radix-ui/react-dialog';
 import { fetchTask, saveTask } from './api';
 import { BoardView, initials, ListView } from './Board';
 import { Editor } from './Editor';
 import { Notify } from './Notify';
-import { parseRoute, useBoard, useRoute, useSearch, useStored } from './hooks';
+import { parseRoute, store, useBoard, useRoute, useSearch, useStored } from './hooks';
 import { migrateBrowserStorage } from './migrate';
 import { titleOf, UNSET, valueOf, withProperty, type Board, type Summary } from './types';
 
@@ -18,18 +19,32 @@ const defaults: Preferences = { group: 'Status', sort: 'manual', type: '', assig
 export function App() {
   const { board, error, refresh } = useBoard();
   if (!board) return <div className="boot-screen"><div className="brand-mark">f<span>.</span></div><h1>Frump</h1>{error ? <><p role="alert">{error}</p><button className="button primary" onClick={refresh}><RefreshCw size={16} />Try again</button></> : <><LoaderCircle size={22} className="spin" /><p>Getting your board ready…</p></>}</div>;
-  return <Workspace key={titleOf(board.header)} board={board} error={error} refresh={refresh} />;
+  return <BoardApp key={titleOf(board.header)} board={board} error={error} refresh={refresh} />;
 }
 
-function Workspace({ board, error, refresh }: { board: Board; error: string; refresh: () => void }) {
+function BoardApp({ board, error, refresh }: { board: Board; error: string; refresh: () => void }) {
   const title = titleOf(board.header), boardKey = `frump:${location.origin}:${title}`;
   useState(() => { migrateBrowserStorage(title, boardKey); });
   const [prefs, setPrefs] = useStored<Preferences>(`${boardKey}:view`, defaults);
+  const [sidebarHidden, setSidebarHidden] = useStored(`${boardKey}:sidebar-hidden`, window.matchMedia('(max-width: 900px)').matches);
+  const [effectiveTheme, setEffectiveTheme] = useState<'light' | 'dark'>(() => prefs.theme === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' : prefs.theme);
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 900px)');
+    const update = () => setNarrow(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
   const { route, navigate } = useRoute();
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const [preset, setPreset] = useState<{ key: string; value: string } | null>(null);
   const [moving, setMoving] = useState<number | null>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null), draggingGroup = useRef(false);
+  useEffect(() => {
+    const start = () => { draggingGroup.current = true; }, end = () => { draggingGroup.current = false; };
+    document.addEventListener('frump:group-drag-start', start); document.addEventListener('frump:group-drag-end', end);
+    return () => { document.removeEventListener('frump:group-drag-start', start); document.removeEventListener('frump:group-drag-end', end); };
+  }, []);
   const { ids, pending, error: searchError } = useSearch(prefs.query, board.revision);
   const filter = (patch: Partial<Preferences>) => setPrefs(current => ({ ...defaults, ...current, ...patch }));
   const announce = useCallback((text: string, error = false) => setNotice({ text, error }), []);
@@ -40,9 +55,14 @@ function Workspace({ board, error, refresh }: { board: Board; error: string; ref
     setPreset(key === undefined ? null : { key: prefs.group, value: key }); navigate({ task: 'new', notify: null }, route.task !== null);
   }
   useEffect(() => { document.title = `${title} · Frump`; }, [title]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const apply = () => { document.documentElement.dataset.theme = prefs.theme === 'auto' ? media.matches ? 'dark' : 'light' : prefs.theme; };
+    const apply = () => {
+      const theme = prefs.theme === 'auto' ? media.matches ? 'dark' : 'light' : prefs.theme;
+      document.documentElement.dataset.theme = theme; setEffectiveTheme(theme);
+      store('frump:theme', prefs.theme);
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#15181f' : '#f7f8fa');
+    };
     apply(); media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
   }, [prefs.theme]);
@@ -50,7 +70,7 @@ function Workspace({ board, error, refresh }: { board: Board; error: string; ref
     const keys = (event: globalThis.KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (route.notify !== null) return;
+      if (route.notify !== null || draggingGroup.current) return;
       if (event.key === '/') { event.preventDefault(); searchRef.current?.focus(); }
       if (event.key === 'n' && !error) { event.preventDefault(); create(); }
       if (event.key === 'Escape' && route.task !== null) close();
@@ -102,29 +122,28 @@ function Workspace({ board, error, refresh }: { board: Board; error: string; ref
     finally { setMoving(null); }
   }
   const storageKey = `${boardKey}:layout:${group}`;
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <a className="brand" href="#" onClick={event => { event.preventDefault(); close(); }}><span className="brand-mark">f<span>.</span></span><span>frump<span className="brand-caption">a little order, a lot of possibility</span></span></a>
-      <div className="workspace-card"><span className="workspace-avatar">{initials(title)}</span><div><strong>{title}</strong><span>Local workspace</span></div></div>
-      <p className="nav-caption">WORKSPACE</p>
-      <nav aria-label="Workspace"><button className={`nav-item ${prefs.scope === 'all' ? 'active' : ''}`} onClick={() => filter({ scope: 'all' })}><Columns3 size={18} /><span>All tasks</span><span className="nav-count">{board.tasks.length}</span></button>
+  const sidebar = <aside className="sidebar" aria-label="Task navigation">
+      <div className="sidebar-brand"><a className="brand" href="#" onClick={event => { event.preventDefault(); close(); }}><span className="brand-mark">f<span>.</span></span><span>frump</span></a><button className="icon-button" aria-label="Hide sidebar" title="Hide sidebar" onClick={() => setSidebarHidden(true)}><PanelLeftClose size={18} /></button></div>
+      <p className="nav-caption">TASK VIEWS</p>
+      <nav aria-label="Task views"><button className={`nav-item ${prefs.scope === 'all' ? 'active' : ''}`} onClick={() => filter({ scope: 'all' })}><Columns3 size={18} /><span>All tasks</span><span className="nav-count">{board.tasks.length}</span></button>
         <button className={`nav-item ${prefs.scope === 'done' ? 'active' : ''}`} onClick={() => filter({ scope: 'done' })}><CheckCheck size={18} /><span>Completed</span><span className="nav-count">{done}</span></button></nav>
       {board.team.length > 0 && <div className="team-section"><p className="nav-caption">TEAM <Users size={13} /></p>{board.team.map(member => <button key={member.email} className={`team-member ${prefs.assignee === member.name ? 'active' : ''}`} onClick={() => filter({ assignee: prefs.assignee === member.name ? '' : member.name })}><span className="avatar">{initials(member.name)}</span><span><strong>{member.name}</strong><small>{member.role || member.email}</small></span></button>)}</div>}
       <div className="sidebar-bottom"><div className="progress-heading"><span>Board progress</span><strong>{progress}%</strong></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><p>{done} of {board.tasks.length} tasks complete</p><span className={`connection ${error ? 'offline' : ''}`}><span />{error ? 'Connection interrupted' : 'Connected to your board'}</span></div>
-    </aside>
-    <div className="workspace-main">
-      <header className="topbar"><div className="breadcrumb"><span>{title}</span><ChevronDown size={12} /><span>{prefs.scope === 'done' ? 'Completed' : 'All tasks'}</span></div>
-        <div className="topbar-actions"><span className="local-pill"><Circle size={8} fill="currentColor" />Local board</span><button className="icon-button" title="Refresh board" aria-label="Refresh board" onClick={refresh}><RefreshCw size={16} className={moving !== null ? 'spin' : ''} /></button>
-          <button className="icon-button" title={`Theme: ${prefs.theme}`} aria-label="Change theme" onClick={() => filter({ theme: prefs.theme === 'auto' ? 'dark' : prefs.theme === 'dark' ? 'light' : 'auto' })}>{prefs.theme === 'dark' ? <Moon size={17} /> : <Sun size={17} />}</button></div>
-      </header>
-      <section className="page-heading"><div><div className="heading-eyebrow">YOUR WORK, IN VIEW</div><h1>{prefs.scope === 'done' ? 'Completed tasks' : 'Project board'}<span>{board.tasks.length}</span></h1><p>A clear view of what is next and what is moving forward.</p></div><button className="button primary new-task" disabled={!!error} onClick={() => create()}><Plus size={17} />New task<kbd>N</kbd></button></section>
+    </aside>;
+  return <div className="app-shell">
+    {!sidebarHidden && (narrow ? <Dialog.Root open onOpenChange={open => setSidebarHidden(!open)}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="sidebar-dialog"><Dialog.Title className="sr-only">Task navigation</Dialog.Title><Dialog.Description className="sr-only">Task views and team filters for this board.</Dialog.Description>{sidebar}</Dialog.Content></Dialog.Portal></Dialog.Root> : sidebar)}
+    <div className="main-layout">
+      <section className="page-heading"><div className="heading-content">
+        {sidebarHidden && <button className="sidebar-toggle" aria-label="Show sidebar" title="Show sidebar" onClick={() => setSidebarHidden(false)}><span className="brand-mark">f<span>.</span></span><PanelLeftOpen size={14} /></button>}
+        <div><div className="heading-eyebrow">YOUR WORK, IN VIEW</div><h1>{prefs.scope === 'done' ? 'Completed tasks' : 'Project board'}<span>{board.tasks.length}</span></h1><p>{title}</p></div>
+      </div><button className="button primary new-task" disabled={!!error} onClick={() => create()}><Plus size={17} />New task<kbd>N</kbd></button></section>
       <div className="viewbar"><div className="view-tabs" role="group" aria-label="View"><button aria-pressed={prefs.view === 'board'} className={prefs.view === 'board' ? 'active' : ''} onClick={() => filter({ view: 'board' })}><Columns3 size={16} />Board</button><button aria-pressed={prefs.view === 'list'} className={prefs.view === 'list' ? 'active' : ''} onClick={() => filter({ view: 'list' })}><LayoutList size={17} />List</button></div><span className="viewbar-hint">{tasks.length} task{tasks.length === 1 ? '' : 's'} in view</span></div>
       <div className="toolbar"><div className="search-field"><Search size={17} /><input ref={searchRef} aria-label="Search tasks" placeholder="Search tasks…" value={prefs.query} onChange={event => filter({ query: event.target.value })} />{pending ? <LoaderCircle size={14} className="spin" /> : prefs.query ? <button className="icon-button" aria-label="Clear search" onClick={() => filter({ query: '' })}><X size={14} /></button> : <kbd>/</kbd>}</div>
         <label className="filter-select"><span>Type</span><select aria-label="Filter by type" value={prefs.type} onChange={event => filter({ type: event.target.value })}><option value="">All types</option>{types.map(type => <option key={type}>{type}</option>)}</select></label>
         <label className="filter-select assignee-filter"><span>Assignee</span><select aria-label="Filter by assignee" value={prefs.assignee} onChange={event => filter({ assignee: event.target.value })}><option value="">Anyone</option>{assignees.map(name => <option key={name}>{name}</option>)}</select></label>
         <span className="toolbar-spacer" /><label className="filter-select"><span>Group</span><select aria-label="Group by" value={group} onChange={event => filter({ group: event.target.value })}>{keys.map(key => <option key={key}>{key}</option>)}</select></label>
         <label className="filter-select"><span>Sort</span><select aria-label="Sort tasks" value={prefs.sort} onChange={event => filter({ sort: event.target.value })}><option value="manual">File order</option><option value="id">Number ↑</option><option value="id-desc">Number ↓</option><option value="subject">Subject A–Z</option><option value="type">Type</option><option value="updated">Last updated</option></select></label>
-        <details className="view-options"><summary className="button secondary"><SlidersHorizontal size={16} /><span>Display</span></summary><div className="options-popover"><strong>Board appearance</strong><label><input type="checkbox" checked={prefs.compact} onChange={event => filter({ compact: event.target.checked })} />Compact cards</label><label><input type="checkbox" checked={prefs.hideEmpty} onChange={event => filter({ hideEmpty: event.target.checked })} />Hide empty columns</label><button onClick={() => filter({ order: {}, collapsed: {} })}>Reset column layout</button></div></details>
+        <details className="view-options"><summary className="button secondary"><SlidersHorizontal size={16} /><span>Display</span></summary><div className="options-popover"><strong>Board appearance</strong><label><input type="checkbox" checked={prefs.compact} onChange={event => filter({ compact: event.target.checked })} />Compact cards</label><label><input type="checkbox" checked={prefs.hideEmpty} onChange={event => filter({ hideEmpty: event.target.checked })} />Hide empty columns</label><label className="theme-option"><span>Theme</span><select aria-label="Color theme" value={prefs.theme} onChange={event => filter({ theme: event.target.value as Preferences['theme'] })}><option value="auto">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button onClick={() => filter({ order: {}, collapsed: {} })}>Reset column layout</button></div></details>
       </div>
       {(prefs.type || prefs.assignee || prefs.query || prefs.scope !== 'all') && <div className="active-filters"><span>Showing {tasks.length} of {board.tasks.length} tasks</span><button onClick={() => filter({ type: '', assignee: '', query: '', scope: 'all' })}>Clear filters<X size={12} /></button></div>}
       {(error || searchError || notice) && <div className={`notice ${(error || searchError || notice?.error) ? 'error' : ''}`} role={(error || searchError || notice?.error) ? 'alert' : 'status'}><AlertCircle size={17} /><span>{error || searchError || notice?.text}</span>{notice && !error && !searchError && <button className="icon-button" aria-label="Dismiss notice" onClick={() => setNotice(null)}><X size={15} /></button>}</div>}
@@ -135,7 +154,8 @@ function Workspace({ board, error, refresh }: { board: Board; error: string; ref
         const current = parseRoute(location.hash);
         if (current.task === route.task && (current.task === 'new' || current.task !== id)) navigate({ task: id, notify: null }, true);
       }} />}</div>
-      <footer className="workspace-footer"><span><Command size={12} />/ to search<span className="footer-dot">·</span>N to create<span className="footer-dot">·</span>Alt + ← → to move</span><a href="https://github.com/sologub/frump" target="_blank" rel="noreferrer">Made for work that moves<ArrowUpRight size={12} /></a></footer>
+      <footer className="board-footer"><span className="footer-context"><strong title={title}>{title}</strong><span className="footer-dot">·</span><span className={`footer-connection ${error ? 'offline' : ''}`}><span />{error ? 'Disconnected' : 'Local board'}</span></span><span className="footer-shortcuts"><Command size={12} />/ to search<span className="footer-dot">·</span>N to create<span className="footer-dot">·</span>Alt + ← → to move tasks</span><div className="footer-controls"><button className="icon-button" title="Refresh board" aria-label="Refresh board" onClick={refresh}><RefreshCw size={16} className={moving !== null ? 'spin' : ''} /></button><button className="icon-button" title={`Theme: ${prefs.theme}. Switch to ${effectiveTheme === 'dark' ? 'light' : 'dark'}.`} aria-label="Change theme" onClick={() => filter({ theme: effectiveTheme === 'dark' ? 'light' : 'dark' })}>{effectiveTheme === 'dark' ? <Moon size={17} /> : <Sun size={17} />}</button></div></footer>
+
     </div>
     {route.notify !== null && <Notify key={route.notify} id={route.notify} board={board} boardKey={boardKey} onClose={() => navigate({ task: route.task, notify: null }, true)} onNotice={announce} />}
   </div>;

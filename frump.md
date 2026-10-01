@@ -68,3 +68,11 @@ Assigned To: Ruslan Sologub
 Status: done
 Last Updated: 2026-10-01T17:55:35Z
 
+### Task 13 - Move board progress into the heading and remove the sidebar
+
+Remove the entire task navigation sidebar and its restore controls. Place board progress horizontally beside the Project board heading, showing the percentage and completed/total count. Keep progress based on the whole board when filters are active, maintain completed filtering in Display, and fit narrow screens without a side rail. Update source, embedded assets, documentation and affected browser checks, validate the real server and install into the existing system-wide executable. Preserve the user-managed server lifecycle.
+
+Assigned To: Ruslan Sologub
+Status: working
+Last Updated: 2026-10-01T17:56:39Z
+

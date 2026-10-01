@@ -28,14 +28,19 @@ export function MarkdownEditor({ value, onChange, disabled }: { value: string; o
         return true;
       },
     },
-    onUpdate: ({ editor }) => { emitted.current = editor.getMarkdown(); change.current(emitted.current); },
+    onUpdate: ({ editor, transaction, appendedTransactions }) => {
+      // Editable-state updates also emit this event without changing the document.
+      // Keep the original Markdown bytes until text or formatting actually changes.
+      if (!transaction.docChanged && !appendedTransactions.some(update => update.docChanged)) return;
+      emitted.current = editor.getMarkdown(); change.current(emitted.current);
+    },
   });
   useEffect(() => {
     if (!editor || value === emitted.current) return;
     editor.commands.setContent(value, { contentType: 'markdown', emitUpdate: false });
     emitted.current = value;
   }, [editor, value]);
-  useEffect(() => { editor?.setEditable(!disabled); }, [editor, disabled]);
+  useEffect(() => { editor?.setEditable(!disabled, false); }, [editor, disabled]);
   const state = useEditorState({ editor, selector: ({ editor }) => editor ? {
     bold: editor.isActive('bold'), italic: editor.isActive('italic'), strike: editor.isActive('strike'),
     bullet: editor.isActive('bulletList'), ordered: editor.isActive('orderedList'), task: editor.isActive('taskList'),

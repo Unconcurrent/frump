@@ -18,6 +18,65 @@ test('one rendered editor formats text and saves Markdown without a preview swit
   expect((await (await request.get('/api/tasks/2')).json()).body).toBe('**A useful description**');
 });
 
+test('viewing untouched Markdown never creates a draft or rewrites its source', async ({ page, request }) => {
+  const source = 'Details\n-------\n\nAn _important_ detail.\n\n+ First\n+ Second';
+  writeFileSync(boardPath, readFileSync(boardPath, 'utf8').replace('Second task body.', source));
+  await page.goto('/#task/2');
+  const clean = page.getByText('All changes saved', { exact: true });
+  await expect(clean).toBeVisible();
+  const body = page.getByRole('textbox', { name: 'Body', exact: true });
+  await body.click();
+  await body.press('ControlOrMeta+a');
+  await expect(clean).toBeVisible();
+  await page.getByRole('button', { name: 'Expand task view', exact: true }).click();
+  await expect(clean).toBeVisible();
+  await page.getByRole('button', { name: 'Dock task panel', exact: true }).click();
+  await expect(clean).toBeVisible();
+  await page.getByRole('button', { name: 'Close task view', exact: true }).click();
+  expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key.includes(':draft:')))).toEqual([]);
+  await page.getByRole('button', { name: 'Repair the task panel', exact: true }).click();
+  await expect(page.getByText('Your unsaved draft was restored.', { exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(clean).toBeVisible();
+  await page.getByRole('button', { name: 'Save task', exact: true }).click();
+  await expect(page.getByText('Saved', { exact: true })).toBeVisible();
+  expect((await (await request.get('/api/tasks/2')).json()).body).toBe(source);
+  await page.getByRole('button', { name: 'Close task view', exact: true }).click();
+  expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key.includes(':draft:')))).toEqual([]);
+  await page.getByRole('button', { name: 'Repair the task panel', exact: true }).click();
+  await expect(clean).toBeVisible();
+
+  // A false draft cached by an older build must stay cleared after Reload from file.
+  await page.getByRole('button', { name: 'Close task view', exact: true }).click();
+  const original = await (await request.get('/api/tasks/2')).json();
+  await page.evaluate(base => {
+    const key = `frump:${location.origin}:Mission control:draft:2`;
+    localStorage.setItem(key, JSON.stringify({ base, form: { ...base, body: '## Details\n\nAn *important* detail.\n\n- First\n- Second' } }));
+  }, original);
+  await page.getByRole('button', { name: 'Repair the task panel', exact: true }).click();
+  await expect(page.getByText('Your unsaved draft was restored.', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Reload from file', exact: true }).click();
+  await expect(clean).toBeVisible();
+  await page.reload();
+  await expect(clean).toBeVisible();
+  await expect(page.getByText('Your unsaved draft was restored.', { exact: true })).toHaveCount(0);
+  expect((await (await request.get('/api/tasks/2')).json()).body).toBe(source);
+});
+
+test('formatting-only edits still restore as genuine drafts', async ({ page, request }) => {
+  await page.goto('/#task/2');
+  const body = page.getByRole('textbox', { name: 'Body', exact: true });
+  await body.click();
+  await body.press('ControlOrMeta+a');
+  await page.getByRole('button', { name: 'Bold', exact: true }).click();
+  await expect(body.locator('strong')).toHaveText('Second task body.');
+  await page.getByRole('button', { name: 'Close task view', exact: true }).click();
+  await page.getByRole('button', { name: 'Repair the task panel', exact: true }).click();
+  await expect(page.getByText('Your unsaved draft was restored.', { exact: true })).toBeVisible();
+  await expect(body.locator('strong')).toHaveText('Second task body.');
+  expect((await (await request.get('/api/tasks/2')).json()).body).toBe('Second task body.');
+});
+
 test('dark mode covers the page, persists, and follows the system when selected', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'light' });
   await page.goto('/');

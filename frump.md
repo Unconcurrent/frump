@@ -32,9 +32,9 @@ Implemented React and TypeScript components with Radix dialogs, TanStack virtual
 
 The web read model now owns file-metadata invalidation, compact summaries, incremental updates, conditional responses, full-text search and lazy task-body reads. The old DOM application is removed. The legacy document API preserves full data, including duplicate records; the editor refuses ambiguous task numbers. Browser saves compare the original task under the shared board write lock before writing. Task bodies keep the CLI size semantics.
 
-Validation: 143 Rust tests, 8 frontend unit tests and 19 real-browser tests passed. TypeScript and production asset builds passed; Clippy with warnings denied, Rust formatting, release compilation and verified Rust packaging passed. Both original defects were reproduced with behavioral tests before the replacement. The large-body idle test transferred 994 JSON bytes over 4.5 seconds with two empty refreshes. Tests also cover sharded-file changes, a 2000-task virtualized column, external edits, drafts, full-body search, drag and drop, mobile notifications, hidden tabs, legacy preferences and delayed saves. Desktop, mobile, dark and task-panel renders were inspected. The installed release serves embedded HTML, JavaScript, CSS and compact summaries successfully. The updated command is installed in the user command directory.
+Validation: 143 Rust tests, 8 frontend unit tests and 19 real-browser tests passed. TypeScript and production asset builds passed; Clippy with warnings denied, Rust formatting, release compilation and verified Rust packaging passed. Both original defects were reproduced with behavioral tests before the replacement. The large-body idle test transferred 994 JSON bytes over 4.5 seconds with two empty refreshes. Tests also cover sharded-file changes, a 2000-task virtualized column, external edits, drafts, full-body search, drag and drop, mobile notifications, hidden tabs, legacy preferences and delayed saves. Desktop, mobile, dark and task-panel renders were inspected. The installed release serves embedded HTML, JavaScript, CSS and compact summaries successfully. The updated command is installed system-wide at /usr/local/bin/frump with root ownership. The duplicate user installation has been removed. Normal command resolution and the embedded React assets, compact summaries and empty unchanged responses were verified from the system-wide executable.
 
-Knowledge learning audit: verified prevention guidance is recorded in frump/web/board-read-model, frump/web/task-selection-and-drafts, frump/web/concurrent-editing, frump/web/frontend-build-and-controls and frump/engineering/scoped-knowledge-inspection. This covers the original read and navigation defects, asynchronous save and draft risks, accessible control labels, root-anchored Cargo package includes and scoped knowledge inspection. No verified reusable mistake remains unrepresented.
+Knowledge learning audit: verified prevention guidance is recorded in frump/web/board-read-model, frump/web/task-selection-and-drafts, frump/web/concurrent-editing, frump/web/frontend-build-and-controls and frump/engineering/scoped-knowledge-inspection. This covers the original read and navigation defects, asynchronous save and draft risks, accessible control labels, root-anchored Cargo package includes and scoped knowledge inspection. Installation ownership and duplicate executable prevention are also recorded in frump/engineering/system-installation. No verified reusable mistake remains unrepresented.
 
 Self-review: UI state and the cached read model are local to their owning modules, shared board rules remain authoritative, and complete Markdown text survives reads and saves. Source and embedded assets are committed together.
 
@@ -43,4 +43,8 @@ PASS
 Assigned To: Ruslan Sologub
 Status: done
 Last Updated: 2026-10-01T16:59:27Z
+
+Assigned To: Ruslan Sologub
+Status: done
+Last Updated: 2026-10-01T17:04:49Z
 

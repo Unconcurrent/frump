@@ -145,7 +145,7 @@ export function Editor({ id, board, boardKey, preset, available, onClose, onSave
       if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); saveButton.current?.click(); }
       if (event.key === 'Escape' && !busy) { event.preventDefault(); onClose(); }
     }}>
-      <div className="editor-scroll">
+      <fieldset disabled={busy} className="editor-scroll">
         {!available && <div className="conflict-banner"><AlertCircle size={18} /><div>The board cannot be read. Saving is paused; your draft is kept.</div></div>}
         {conflict && <div className="conflict-banner"><AlertCircle size={18} /><div><p>{conflict === 'removed' ? 'This task was removed from the board. Your draft is still here.' : conflict === 'restored' ? 'Your unsaved draft was restored.' : 'This task changed outside this view. Your draft is untouched.'}</p>
           <div className="banner-actions">{current && conflict !== 'removed' && <><button type="button" onClick={() => { setForm(current); setBase(current); setConflict(null); store(draftKey, null); }}>Reload from file</button><button type="button" onClick={() => { setBase(current); setConflict(null); }}>Keep my draft</button></>}
@@ -168,9 +168,9 @@ export function Editor({ id, board, boardKey, preset, available, onClose, onSave
           {tab === 'write' ? <><label className="sr-only" htmlFor={`${listId}-body`}>Body</label><textarea id={`${listId}-body`} className="body-input" value={form.body} onChange={event => setForm({ ...form, body: event.target.value })} onKeyDown={textKey} placeholder="Add context, a plan, or the details that matter…" /><p className="editor-tip">Markdown supported · ⌘ / Ctrl + Enter to save</p></> : form.body ? <Markdown text={form.body} /> : <button type="button" className="description-empty" onClick={() => setTab('write')}>Add a description…</button>}
         </div>
         {valueOf(form, 'Last Updated') !== UNSET && <p className="updated-at">Last updated {valueOf(form, 'Last Updated').replace('T', ' ').replace('Z', ' UTC')}</p>}
-      </div>
+      </fieldset>
       <footer className="editor-footer">{error && <p className="form-error" role="alert">{error}</p>}
-        <div className="editor-save-row"><span className={`draft-status ${saved ? 'saved' : ''}`}>{saved ? <><Check size={14} />Saved</> : dirty ? 'Unsaved draft' : 'All changes saved'}</span>
+        <div className="editor-save-row"><span className={`draft-status ${saved ? 'saved' : ''}`}>{saved ? <><Check size={14} />Saved</> : dirty ? 'Unsaved draft' : id === 'new' ? 'Ready to create' : 'All changes saved'}</span>
           <button className="button primary" ref={saveButton} disabled={busy || !available || conflict === 'changed' || conflict === 'removed'}>{busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}Save task</button></div>
         <div className="editor-secondary-actions">{id !== 'new' && <button className="text-button" type="button" disabled={busy} onClick={() => onNotify(id)}><Bell size={14} />Notify</button>}
           {dirty && <button className="text-button" type="button" disabled={busy} onClick={() => { suppressDraft.current = true; store(draftKey, null); onClose(); }}>Discard draft</button>}

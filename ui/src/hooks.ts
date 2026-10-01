@@ -8,10 +8,11 @@ export function useBoard() {
   const revision = useRef<number>(undefined);
   const refreshRef = useRef<() => void>(() => {});
   useEffect(() => {
-    let disposed = false, timer: ReturnType<typeof setTimeout>, active: AbortController | null = null, queued = false;
+    let disposed = false, timer: ReturnType<typeof setTimeout>, active: AbortController | null = null, queued = false, dragging = false;
     async function refresh() {
       clearTimeout(timer);
       if (disposed || document.hidden) return;
+      if (dragging) { timer = setTimeout(refresh, 2000); return; }
       if (active) { queued = true; return; }
       const controller = new AbortController();
       active = controller;
@@ -33,8 +34,16 @@ export function useBoard() {
       else void refresh();
     };
     document.addEventListener('visibilitychange', visibility);
+    const dragStarted = () => { dragging = true; };
+    const dragEnded = () => { dragging = false; void refresh(); };
+    document.addEventListener('dragstart', dragStarted);
+    document.addEventListener('dragend', dragEnded);
     void refresh();
-    return () => { disposed = true; clearTimeout(timer); active?.abort(); document.removeEventListener('visibilitychange', visibility); };
+    return () => {
+      disposed = true; clearTimeout(timer); active?.abort();
+      document.removeEventListener('visibilitychange', visibility);
+      document.removeEventListener('dragstart', dragStarted); document.removeEventListener('dragend', dragEnded);
+    };
   }, []);
   return { board, error, refresh: useCallback(() => refreshRef.current(), []) };
 }

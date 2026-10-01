@@ -23,9 +23,9 @@ export function Notify({ id, board, boardKey, onClose, onNotice }: { id: number;
       } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
       finally { setBusy(false); }
     }}>
-      <div className="notify-body"><label className="field"><span id={`${ids}-recipient-label`}>Recipient</span><input ref={recipientRef} aria-labelledby={`${ids}-recipient-label`} aria-describedby={`${ids}-recipient-hint`} required value={form.recipient} onChange={event => update({ ...form, recipient: event.target.value })} placeholder="Crew member or team" autoComplete="off" /><small id={`${ids}-recipient-hint`}>A Metateam target, such as a crew member or all.</small></label>
+      <fieldset disabled={busy} className="notify-body"><label className="field"><span id={`${ids}-recipient-label`}>Recipient</span><input ref={recipientRef} aria-labelledby={`${ids}-recipient-label`} aria-describedby={`${ids}-recipient-hint`} required value={form.recipient} onChange={event => update({ ...form, recipient: event.target.value })} placeholder="Crew member or team" autoComplete="off" /><small id={`${ids}-recipient-hint`}>A Metateam target, such as a crew member or all.</small></label>
         <label className="field"><span id={`${ids}-message-label`}>Message</span><textarea aria-labelledby={`${ids}-message-label`} aria-describedby={`${ids}-message-hint`} required value={form.message} onChange={event => update({ ...form, message: event.target.value })} placeholder="What would you like them to know?" /><small id={`${ids}-message-hint`}>The task number and subject are included automatically.</small></label>
-        {error && <p className="form-error" role="alert">{error}</p>}</div>
+        {error && <p className="form-error" role="alert">{error}</p>}</fieldset>
       <footer className="notify-footer"><button type="button" className="button secondary" disabled={busy} onClick={onClose}>Cancel</button><button className="button primary" disabled={busy || !task}>{busy ? <LoaderCircle size={16} className="spin" /> : <Send size={16} />}Send notification</button></footer>
     </form>
   </Dialog.Content></Dialog.Portal></Dialog.Root>;

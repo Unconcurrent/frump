@@ -97,6 +97,7 @@ pub(super) struct BoardCache {
     removed: Vec<u32>,
     order: Vec<u32>,
     order_changed: bool,
+    duplicate_document: Option<Vec<TaskDto>>,
 }
 
 impl BoardCache {
@@ -138,6 +139,7 @@ impl BoardCache {
             .map(|task| task.id)
             .collect();
         let incoming: BTreeSet<_> = order.iter().copied().collect();
+        let duplicate_document = (incoming.len() != order.len()).then(|| document.tasks.clone());
         let removed: Vec<_> = self
             .tasks
             .keys()
@@ -211,6 +213,7 @@ impl BoardCache {
         self.team = document.team;
         self.next = next;
         self.order_changed = self.order != order;
+        self.duplicate_document = duplicate_document;
         self.order = order;
         self.changed = changed;
         self.removed = removed;
@@ -219,6 +222,9 @@ impl BoardCache {
     }
 
     pub fn board_response(&self, since: Option<u64>) -> Result<Response> {
+        if self.duplicate_document.is_some() {
+            anyhow::bail!("The board has duplicate task numbers. Run frump renumber-duplicates before editing it in the browser.");
+        }
         if since == Some(self.revision) {
             return response(StatusCode::NOT_MODIFIED, self.revision, Body::empty());
         }
@@ -251,11 +257,12 @@ impl BoardCache {
         let document = DocumentDto {
             header: self.header.clone(),
             team: self.team.clone(),
-            tasks: self
-                .order
-                .iter()
-                .filter_map(|id| self.tasks.get(id).map(|task| task.dto.clone()))
-                .collect(),
+            tasks: self.duplicate_document.clone().unwrap_or_else(|| {
+                self.order
+                    .iter()
+                    .filter_map(|id| self.tasks.get(id).map(|task| task.dto.clone()))
+                    .collect()
+            }),
         };
         response(
             StatusCode::OK,
@@ -265,6 +272,9 @@ impl BoardCache {
     }
 
     pub fn task_response(&self, id: u32, headers: &HeaderMap) -> Result<Response> {
+        if self.duplicate_document.is_some() {
+            anyhow::bail!("The board has duplicate task numbers. Run frump renumber-duplicates before editing it in the browser.");
+        }
         let Some(task) = self.tasks.get(&id) else {
             return Ok((StatusCode::NOT_FOUND, "Task not found").into_response());
         };
@@ -484,5 +494,19 @@ mod tests {
         fixture.write("Recovered evidence");
         cache.refresh(&fixture.file()).unwrap();
         assert_eq!(cache.search("recovered"), [1]);
+    }
+
+    #[tokio::test]
+    async fn legacy_document_reads_preserve_duplicates_while_the_editor_refuses_ambiguous_numbers()
+    {
+        let fixture = BoardFixture::new();
+        fs::write(fixture.file(), "# Duplicates\n\n## Tasks\n\n### Task 1 - First\n\nOne body\n\n### Task 1 - Second\n\nAnother body\n").unwrap();
+        let mut cache = BoardCache::default();
+        cache.refresh(&fixture.file()).unwrap();
+        let document = json(cache.document_response(&HeaderMap::new()).unwrap()).await;
+        assert_eq!(document["tasks"][0]["subject"], "First");
+        assert_eq!(document["tasks"][1]["subject"], "Second");
+        assert!(cache.board_response(None).is_err());
+        assert!(cache.task_response(1, &HeaderMap::new()).is_err());
     }
 }

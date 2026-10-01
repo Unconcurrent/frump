@@ -4,7 +4,8 @@ import { fetchTask, saveTask } from './api';
 import { BoardView, initials, ListView } from './Board';
 import { Editor } from './Editor';
 import { Notify } from './Notify';
-import { useBoard, useRoute, useSearch, useStored } from './hooks';
+import { parseRoute, useBoard, useRoute, useSearch, useStored } from './hooks';
+import { migrateBrowserStorage } from './migrate';
 import { titleOf, UNSET, valueOf, withProperty, type Board, type Summary } from './types';
 
 type Preferences = {
@@ -22,6 +23,7 @@ export function App() {
 
 function Workspace({ board, error, refresh }: { board: Board; error: string; refresh: () => void }) {
   const title = titleOf(board.header), boardKey = `frump:${location.origin}:${title}`;
+  useState(() => { migrateBrowserStorage(title, boardKey); });
   const [prefs, setPrefs] = useStored<Preferences>(`${boardKey}:view`, defaults);
   const { route, navigate } = useRoute();
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
@@ -128,7 +130,11 @@ function Workspace({ board, error, refresh }: { board: Board; error: string; ref
       {(error || searchError || notice) && <div className={`notice ${(error || searchError || notice?.error) ? 'error' : ''}`} role={(error || searchError || notice?.error) ? 'alert' : 'status'}><AlertCircle size={17} /><span>{error || searchError || notice?.text}</span>{notice && !error && !searchError && <button className="icon-button" aria-label="Dismiss notice" onClick={() => setNotice(null)}><X size={15} /></button>}</div>}
       <div className="content-area"><main className={`board-area ${moving !== null ? 'saving-move' : ''}`} aria-label="Task board">
         {prefs.view === 'board' ? <BoardView tasks={tasks} allTasks={board.tasks} group={group} compact={prefs.compact} selected={route.task} hideEmpty={prefs.hideEmpty} order={prefs.order[group] || []} collapsed={prefs.collapsed[group] || []} storageKey={storageKey} onOpen={open} onNotify={notify} onNew={create} onMove={(id, key) => void move(id, key)} onLayout={(order, collapsed) => filter({ order: { ...prefs.order, [group]: order }, collapsed: { ...prefs.collapsed, [group]: collapsed } })} /> : <ListView tasks={tasks} selected={route.task} onOpen={open} onNotify={notify} storageKey={storageKey} />}
-      </main>{route.task !== null && <Editor key={route.task} id={route.task} board={board} boardKey={boardKey} preset={preset} available={!error} onClose={close} onOpen={open} onNotify={notify} onNotice={announce} onSaved={id => { refresh(); if (route.task === 'new' || route.task !== id) navigate({ task: id, notify: null }, true); }} />}</div>
+      </main>{route.task !== null && <Editor key={route.task} id={route.task} board={board} boardKey={boardKey} preset={preset} available={!error} onClose={close} onOpen={open} onNotify={notify} onNotice={announce} onSaved={id => {
+        refresh();
+        const current = parseRoute(location.hash);
+        if (current.task === route.task && (current.task === 'new' || current.task !== id)) navigate({ task: id, notify: null }, true);
+      }} />}</div>
       <footer className="workspace-footer"><span><Command size={12} />/ to search<span className="footer-dot">·</span>N to create<span className="footer-dot">·</span>Alt + ← → to move</span><a href="https://github.com/sologub/frump" target="_blank" rel="noreferrer">Made for work that moves<ArrowUpRight size={12} /></a></footer>
     </div>
     {route.notify !== null && <Notify key={route.notify} id={route.notify} board={board} boardKey={boardKey} onClose={() => navigate({ task: route.task, notify: null }, true)} onNotice={announce} />}

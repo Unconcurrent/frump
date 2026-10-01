@@ -227,3 +227,49 @@ test('desktop layouts render without browser errors or external runtime dependen
   expect(errors).toEqual([]);
   expect(external).toEqual([]);
 });
+
+test('existing UI preferences and unsaved drafts migrate without being discarded', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('frump.board.prefs', JSON.stringify({ theme: 'dark', groupBy: 'Priority', density: 'compact', query: '', sort: 'id', type: '', hideEmpty: false, order: {}, collapsed: {} }));
+    localStorage.setItem('frump.board.draft', JSON.stringify({ docKey: 'Mission control', id: 2, form: { task_type: 'Bug', subject: 'A draft from the previous UI', body: 'Still needed.', status: 'working', properties: [] } }));
+    localStorage.setItem('frump.board.notify', JSON.stringify({ docKey: 'Mission control', id: 2, recipient: 'test-member', message: 'An unsent notification.' }));
+  });
+  await page.goto('/#task/2');
+  await expect(page.getByRole('textbox', { name: 'Subject', exact: true })).toHaveValue('A draft from the previous UI');
+  await expect(page.getByRole('combobox', { name: 'Group by', exact: true })).toHaveValue('Priority');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.getByRole('button', { name: 'Notify', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Recipient', exact: true })).toHaveValue('test-member');
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('An unsent notification.');
+});
+
+test('hidden tabs stop polling and resume with current data when shown', async ({ page }) => {
+  let reads = 0;
+  page.on('request', request => { if (new URL(request.url()).pathname === '/api/board') reads++; });
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Design the navigation', exact: true })).toBeVisible();
+  await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); });
+  const before = reads;
+  writeFileSync(boardPath, readFileSync(boardPath, 'utf8').replace('Repair the task panel', 'Updated while hidden'));
+  await page.waitForTimeout(2400);
+  expect(reads).toBe(before);
+  await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: false }); document.dispatchEvent(new Event('visibilitychange')); });
+  await expect(page.getByRole('button', { name: 'Updated while hidden', exact: true })).toBeVisible();
+  expect(reads).toBeGreaterThan(before);
+});
+
+test('a save finishing after task navigation does not reopen the abandoned view', async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/tasks', async route => { await pending; await route.continue(); });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New task', exact: false }).click();
+  await page.getByRole('textbox', { name: 'Subject', exact: true }).fill('Saved in the background');
+  await page.getByRole('button', { name: 'Save task', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Subject', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Repair the task panel', exact: true }).click();
+  release();
+  await expect(page.getByRole('button', { name: 'Saved in the background', exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#task\/2$/);
+  await expect(page.getByRole('textbox', { name: 'Subject', exact: true })).toHaveValue('Repair the task panel');
+});

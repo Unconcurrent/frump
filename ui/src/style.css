@@ -22,6 +22,7 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 button, a, input, textarea, select, summary { outline-offset: 3px; }
 :focus-visible { outline: 2px solid var(--accent); }
 button { border: 0; background: none; }
+fieldset { border: 0; margin: 0; min-width: 0; }
 a { color: inherit; text-decoration: none; }
 h1, h2, h3, p { margin: 0; }
 svg { flex-shrink: 0; }

@@ -68,9 +68,8 @@ impl BoardHistory {
     /// History holds task content only: task files, or the Tasks section of a single file. The
     /// header, Team and Next sections are not read, so a committed typo there cannot make the
     /// task numbers of that commit unreadable. A board outside git, or in a repository without
-    /// commits, has an empty history. A failed object read, a board path of the wrong kind, or
-    /// a task that does not parse is an error: an unreadable history must never pass for an
-    /// empty one.
+    /// commits, has an empty history. Malformed historical headings are tolerated while valid
+    /// task IDs are retained. Object-read errors and paths of the wrong kind remain errors.
     pub fn load(board: &Path) -> Result<Self> {
         let board = crate::board::resolve_board(board)?;
         let board = board.as_path();
@@ -261,7 +260,7 @@ struct SnapshotReader<'repo> {
     /// Parsed snapshots by the object id of a board file or a tasks directory.
     snapshots: HashMap<Oid, Arc<Snapshot>>,
     /// Parsed task files by blob id, so each distinct task file is parsed once.
-    task_files: HashMap<Oid, Task>,
+    task_files: HashMap<Oid, Vec<Task>>,
 }
 
 impl SnapshotReader<'_> {
@@ -306,22 +305,19 @@ impl SnapshotReader<'_> {
                     if file.kind() != Some(ObjectType::Blob) {
                         bail!("Task path tasks/{name} is not a file");
                     }
-                    let task = match self.task_files.get(&file.id()) {
-                        Some(task) => task.clone(),
+                    let parsed = match self.task_files.get(&file.id()) {
+                        Some(tasks) => tasks.clone(),
                         None => {
                             let fragment = self.blob_text(file.id(), name)?;
-                            let mut parsed =
-                                parser::parse_tasks(&format!("## Tasks\n\n{fragment}"))
-                                    .with_context(|| format!("Failed to parse task file {name}"))?;
-                            if parsed.len() != 1 {
-                                bail!("Task file {name} must contain exactly one task");
-                            }
-                            let task = parsed.remove(0);
-                            self.task_files.insert(file.id(), task.clone());
-                            task
+                            let parsed = parser::parse_tasks(&format!("## Tasks\n\n{fragment}"))
+                                .with_context(|| format!("Failed to parse task file {name}"))?;
+                            self.task_files.insert(file.id(), parsed.clone());
+                            parsed
                         }
                     };
-                    snapshot.insert(task.id, task);
+                    for task in parsed {
+                        snapshot.entry(task.id).or_insert(task);
+                    }
                 }
                 let snapshot = Arc::new(snapshot);
                 self.snapshots.insert(tasks.id(), snapshot.clone());

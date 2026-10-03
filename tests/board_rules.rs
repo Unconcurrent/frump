@@ -481,9 +481,9 @@ fn a_migrated_board_keeps_its_history_and_a_custom_destination_warns() {
 }
 
 #[test]
-fn an_unreadable_history_stops_add_and_close_before_any_write() {
+fn malformed_historical_tasks_do_not_block_add_or_close() {
     let root = git_repo("bad-history");
-    let board = single_board(&root, "### Task x - Broken\n");
+    let board = single_board(&root, "### Task 7 - Seven\n\n### Task x - Broken\n");
     commit_all(&root, "a board that does not parse");
     fs::write(
         &board,
@@ -491,17 +491,11 @@ fn an_unreadable_history_stops_add_and_close_before_any_write() {
     )
     .unwrap();
     commit_all(&root, "repaired");
-    let before = fs::read(&board).unwrap();
-    for args in [vec!["add", "--subject", "Two"], vec!["close", "1"]] {
-        let refused = frump(&root, &args);
-        assert!(!refused.status.success(), "{args:?}");
-        assert!(
-            stderr(&refused).contains("Failed to read the board in commit"),
-            "{}",
-            stderr(&refused)
-        );
-        assert_eq!(fs::read(&board).unwrap(), before, "{args:?}");
-    }
+    assert_eq!(
+        added_id(&ok(&frump(&root, &["add", "--subject", "Next"]))),
+        8
+    );
+    ok(&frump(&root, &["close", "1"]));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1413,24 +1407,47 @@ fn history_reads_task_content_only_in_both_layouts() {
         8
     );
 
-    // A task that does not parse still stops add and close before any write.
+    // A malformed historical task does not prevent edits to the repaired board.
     fs::write(dir.join("tasks/3.md"), "### Task x - Broken\n").unwrap();
     commit_all(&shards, "broken task");
     fs::remove_file(dir.join("tasks/3.md")).unwrap();
     commit_all(&shards, "removed broken task");
-    let before = fs::read_dir(dir.join("tasks")).unwrap().count();
-    for args in [vec!["add", "--subject", "Blocked"], vec!["close", "1"]] {
-        let refused = frump(&shards, &args);
-        assert!(!refused.status.success(), "{args:?}");
-        assert!(
-            stderr(&refused).contains("Failed to parse task file 3.md"),
-            "{}",
-            stderr(&refused)
-        );
-    }
-    assert_eq!(fs::read_dir(dir.join("tasks")).unwrap().count(), before);
+    assert_eq!(
+        added_id(&ok(&frump(&shards, &["add", "--subject", "Next again"]))),
+        9
+    );
+    ok(&frump(&shards, &["close", "1"]));
     let _ = fs::remove_dir_all(single);
     let _ = fs::remove_dir_all(shards);
+}
+
+#[test]
+fn historical_report_subheadings_preserve_task_numbers_in_both_layouts() {
+    for sharded in [false, true] {
+        let root = git_repo("history-report-headings");
+        let fragment = "### Task 20 - Completed work\n\nReport\n\n### Owning KB learning audit\n\nDetails\n\n### Safe integration and preserved work\n\nStatus: done\n";
+        if sharded {
+            let dir = directory_board(&root, &[]);
+            fs::write(dir.join("tasks/20.md"), fragment).unwrap();
+        } else {
+            single_board(&root, fragment);
+        }
+        commit_all(&root, "historical report");
+        if sharded {
+            fs::remove_file(root.join("frump/tasks/20.md")).unwrap();
+            write_task(&root.join("frump"), 1, "Current", "done", "");
+        } else {
+            single_board(&root, "### Task 1 - Current\n\nStatus: done\n");
+        }
+        commit_all(&root, "current board");
+        assert_eq!(
+            added_id(&ok(&frump(&root, &["add", "--subject", "New"]))),
+            21
+        );
+        ok(&frump(&root, &["validate"]));
+        ok(&frump(&root, &["close", "1"]));
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[test]

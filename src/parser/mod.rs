@@ -139,15 +139,36 @@ pub fn parse(content: &str) -> Result<FrumpDoc> {
     Ok(doc)
 }
 
-/// The tasks of a board's `## Tasks` section, read exactly as [`parse`] reads them, without
-/// reading the header, Team or Next sections. Git history uses it: a committed typo in the Team
-/// section must not make the task numbers of that commit unreadable.
+/// Recover tasks with valid IDs from a historical board's `## Tasks` section.
+/// Old malformed headings and report subheadings must not prevent editing a repaired board.
+/// Keep every recognizable task number; current documents still use strict [`parse`].
 pub fn parse_tasks(content: &str) -> Result<Vec<Task>> {
     let lines: Vec<&str> = content.lines().collect();
     let start = lines
         .iter()
         .position(|line| line.trim().eq_ignore_ascii_case("## Tasks"));
-    tasks_in(&lines, start)
+    let Some(start) = start else {
+        return Ok(Vec::new());
+    };
+    let headings: Vec<usize> = (start + 1..lines.len())
+        .filter(|&i| {
+            lines[i]
+                .trim()
+                .strip_prefix("### ")
+                .and_then(|heading| heading.trim().splitn(3, ' ').nth(1))
+                .and_then(|id| id.parse().ok())
+                .and_then(|id| TaskId::new(id).ok())
+                .is_some()
+        })
+        .collect();
+    let mut tasks = Vec::new();
+    for (index, &begin) in headings.iter().enumerate() {
+        let end = headings.get(index + 1).copied().unwrap_or(lines.len());
+        if let Some(task) = parse_task(&lines[begin..end])? {
+            tasks.push(task);
+        }
+    }
+    Ok(tasks)
 }
 
 /// Tasks from the `## Tasks` line at `start` to the end of the file, one per `### ` heading.

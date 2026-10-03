@@ -874,9 +874,10 @@ frump bulk --help
 - Initialize git: `git init`
 
 ### "Failed to read the board in commit ..."
-- A commit in the board's history holds a task that does not parse, or a board path of the wrong kind
+- A historical Git object cannot be read, or a board path has the wrong kind
 - History reads only task content (task files, or the Tasks section of a single file), so a committed mistake in the header, Team or Next section does not cause this
-- Frump stops rather than treat an unreadable history as empty, because that could give out a used task number
+- Malformed historical task headings and report subheadings do not block current edits. Frump retains every recognizable positive task ID, including closed tasks, so those numbers are not reused. Current board validation remains strict.
+- Git object-read errors still stop the operation rather than silently discard history.
 
 ### "Failed to read frump.md"
 - Make sure frump.md exists in your directory

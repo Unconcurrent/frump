@@ -155,7 +155,7 @@ pub fn parse_tasks(content: &str) -> Result<Vec<Task>> {
             lines[i]
                 .trim()
                 .strip_prefix("### ")
-                .and_then(|heading| heading.trim().splitn(3, ' ').nth(1))
+                .and_then(|heading| heading.trim().split(' ').nth(1))
                 .and_then(|id| id.parse().ok())
                 .and_then(|id| TaskId::new(id).ok())
                 .is_some()

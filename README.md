@@ -101,6 +101,8 @@ Frump supports `Depends On: 1, 2` task properties, validates dependency graphs, 
 
 Use `frump commit --message "short message"` to stage and commit only the task board; it never pushes.
 
+Git history processing retains the latest task states and compact change records, not complete task bodies for every board revision. Task-number allocation still checks the complete history, including closed tasks. Historical snapshots are processed with their parents and then released; this preserves merge-aware history and closed-task recovery without multiplying memory use by the number of revisions.
+
 Every option has a long name, there are no short flags, and a command takes at most one unnamed argument: the task number. `--board PATH` names the board when it is not found from the current directory.
 
 ### Sharded storage

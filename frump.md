@@ -92,3 +92,12 @@ Assigned To: Ruslan Sologub
 Status: done
 Last Updated: 2026-10-01T18:24:09Z
 
+
+### Bug 14 - Keep Git history memory bounded during task operations
+
+Captain reports22GB allocated by Frump. Actual caller session records a task-add operation killed with SIGKILL while allocating the next task after230/231. A read-only history-loading operation also fails under a768MiB disposable limit. The cause remains to establish with the exact allocator path and measured source reproduction.
+
+Plan: reproduce actual task allocation without editing the working board or notifying its assignee. Keep the concern in BoardHistory and its Git snapshot reader. Replace retention of full task bodies for every historical board revision with bounded snapshot processing and compact change records, preserving all history, merge/parent semantics, removed task recovery and never-reused numbers. Add meaningful regression coverage for repeated large unchanged task bodies across revisions. Run existing Rust behavior checks, actual-history allocation and peak-memory comparison, then update the existing system executable without replacing any user-managed server. Self-review and reconcile the owning architectural guidance and actual results. No unrelated UI changes or crew messages.
+
+Assigned To: data
+Status: working

@@ -418,8 +418,7 @@ fn parse_cli() -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = parse_cli();
     let board = match &cli.command {
         Commands::Init { .. } => resolve_board(
@@ -464,7 +463,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Web { port } => {
-            frump::web::serve(board.clone(), *port).await?;
+            tokio::runtime::Runtime::new()?.block_on(frump::web::serve(board.clone(), *port))?;
         }
 
         Commands::Commit { message } => {

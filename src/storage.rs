@@ -45,12 +45,14 @@ pub fn read(path: &Path) -> Result<FrumpDoc> {
     )?;
     let mut tasks = Vec::new();
     for entry in fs::read_dir(root.join("tasks")).context("Failed to read tasks directory")? {
-        let entry = entry?;
-        if entry.path().extension().is_some_and(|ext| ext == "md") {
-            let fragment = fs::read_to_string(entry.path())?;
-            let parsed = parser::parse(&format!("## Tasks\n\n{fragment}"))?;
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "md") {
+            let fragment = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let parsed = parser::parse(&format!("## Tasks\n\n{fragment}"))
+                .with_context(|| format!("Failed to parse {}", path.display()))?;
             if parsed.tasks.len() != 1 {
-                bail!("{} must contain exactly one task", entry.path().display());
+                bail!("{} must contain exactly one task", path.display());
             }
             tasks.extend(parsed.tasks.tasks().iter().cloned());
         }

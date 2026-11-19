@@ -1422,6 +1422,33 @@ fn history_reads_task_content_only_in_both_layouts() {
 }
 
 #[test]
+fn current_report_subheadings_remain_in_tasks_for_both_layouts() {
+    for sharded in [false, true] {
+        let root = unique_root("current-report-headings");
+        let first = "### Task 1 - Report\n\n### 1. The public contract\n\nDetails\n\n### Ordinary text-region cursor precedence\n\nMore details\n\nStatus: done\n";
+        let second = "### Enhancement 2 Another task\n\nStatus: todo\n";
+        if sharded {
+            let board = directory_board(&root, &[]);
+            fs::write(board.join("tasks/1.md"), first).unwrap();
+            fs::write(board.join("tasks/2.md"), second).unwrap();
+        } else {
+            single_board(&root, &format!("{first}\n{second}"));
+        }
+        let list = ok(&frump(&root, &["list"]));
+        assert!(list.contains("Task 1 - Report"), "{list}");
+        assert!(list.contains("Enhancement 2 - Another task"), "{list}");
+        let task = ok(&frump(&root, &["show", "1"]));
+        assert!(task.contains("### 1. The public contract"), "{task}");
+        assert!(
+            task.contains("### Ordinary text-region cursor precedence"),
+            "{task}"
+        );
+        assert!(task.contains("Status: done"), "{task}");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn historical_report_subheadings_preserve_task_numbers_in_both_layouts() {
     for sharded in [false, true] {
         let root = git_repo("history-report-headings");

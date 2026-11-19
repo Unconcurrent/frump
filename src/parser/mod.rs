@@ -152,10 +152,8 @@ pub fn parse_tasks(content: &str) -> Result<Vec<Task>> {
     };
     let headings: Vec<usize> = (start + 1..lines.len())
         .filter(|&i| {
-            lines[i]
-                .trim()
-                .strip_prefix("### ")
-                .and_then(|heading| heading.trim().split(' ').nth(1))
+            task_heading(lines[i])
+                .and_then(|(_, id, _)| id)
                 .and_then(|id| id.parse().ok())
                 .and_then(|id| TaskId::new(id).ok())
                 .is_some()
@@ -171,7 +169,24 @@ pub fn parse_tasks(content: &str) -> Result<Vec<Task>> {
     Ok(tasks)
 }
 
-/// Tasks from the `## Tasks` line at `start` to the end of the file, one per `### ` heading.
+fn task_heading(line: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
+    let heading = line.trim().strip_prefix("### ")?;
+    let mut fields = heading.trim().splitn(3, ' ');
+    Some((fields.next()?, fields.next(), fields.next()))
+}
+
+fn starts_next_task(line: &str) -> bool {
+    let Some((kind, Some(id), subject)) = task_heading(line) else {
+        return false;
+    };
+    let digits = id.strip_prefix(['+', '-']).unwrap_or(id);
+    let numeric_id = !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit());
+    let malformed_standard_task = matches!(kind, "Task" | "Bug" | "Issue" | "Feature")
+        && subject.is_some_and(|title| title == "-" || title.starts_with("- "));
+    numeric_id || malformed_standard_task
+}
+
+/// Tasks from the `## Tasks` line at `start` to the end of the file.
 fn tasks_in(lines: &[&str], start: Option<usize>) -> Result<Vec<Task>> {
     let mut tasks = Vec::new();
     let Some(start) = start else {
@@ -180,15 +195,12 @@ fn tasks_in(lines: &[&str], start: Option<usize>) -> Result<Vec<Task>> {
     let mut i = start + 1;
 
     while i < lines.len() {
-        let line = lines[i].trim();
-
-        // Start of a new task
-        if line.starts_with("### ") {
+        if task_heading(lines[i]).is_some() {
             let task_start = i;
             i += 1;
 
-            // Find the end of this task (next ### or end of file)
-            while i < lines.len() && !lines[i].trim().starts_with("### ") {
+            // Report subheadings can appear at the same Markdown level as task headings.
+            while i < lines.len() && !starts_next_task(lines[i]) {
                 i += 1;
             }
 
@@ -326,28 +338,16 @@ fn parse_task(lines: &[&str]) -> Result<Option<Task>> {
         return Ok(None);
     }
 
-    // Parse the heading: ### Task 3 - Write docs
-    let heading = lines[0].trim_start_matches("### ").trim();
-
-    // Split into task_type, id, and subject
-    let parts: Vec<&str> = heading.splitn(3, ' ').collect();
-
-    if parts.len() < 2 {
-        return Err(anyhow!("Invalid task heading format: {}", heading));
-    }
-
-    let task_type = TaskType::parse(parts[0]);
-    let id = TaskId::new(
-        parts[1]
-            .parse()
-            .map_err(|_| anyhow!("Invalid task ID: {}", parts[1]))?,
-    )?;
-
-    let subject = if parts.len() > 2 {
-        parts[2].trim_start_matches("- ").trim().to_string()
-    } else {
-        String::new()
+    let Some((kind, Some(id), subject)) = task_heading(lines[0]) else {
+        return Err(anyhow!("Invalid task heading format: {}", lines[0].trim()));
     };
+    let task_type = TaskType::parse(kind);
+    let id = TaskId::new(id.parse().map_err(|_| anyhow!("Invalid task ID: {id}"))?)?;
+    let subject = subject
+        .unwrap_or_default()
+        .trim_start_matches("- ")
+        .trim()
+        .to_string();
 
     let mut task = Task::new(id, task_type, subject);
 
